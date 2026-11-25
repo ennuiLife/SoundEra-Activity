@@ -55,6 +55,9 @@ pub struct ChatMessage {
     pub created_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<ReplyRef>,
+    /// A whisper: only the writer and this person see it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
 }
 
 /// How much of the replied-to message is shown (in characters).
@@ -173,5 +176,32 @@ mod tests {
         }
         assert!(!chat_allowed(&mut t, 100));
         assert!(chat_allowed(&mut t, CHAT_BURST_WINDOW_MS + 10)); // the first ones have slid out
+    }
+}
+
+/// A reaction can be one of the four named kinds, or any one emoji sent as `emoji:<the emoji>`.
+pub fn valid_reaction(kind: &str) -> bool {
+    if ReactionKind::parse(kind).is_some() {
+        return true;
+    }
+    match kind.strip_prefix("emoji:") {
+        Some(e) => !e.is_empty() && e.len() <= 32 && e.chars().count() <= 8 && !e.is_ascii() && !e.chars().any(|c| c.is_control() || c.is_whitespace()),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod reaction_tests {
+    use super::*;
+
+    #[test]
+    fn named_and_emoji_reactions_are_accepted_and_text_is_not() {
+        assert!(valid_reaction("fire"));
+        assert!(valid_reaction("emoji:🎉"));
+        assert!(valid_reaction("emoji:👍🏽"));
+        assert!(!valid_reaction("emoji:"));
+        assert!(!valid_reaction("emoji:hello"));
+        assert!(!valid_reaction("emoji:🎉 x"));
+        assert!(!valid_reaction("nope"));
     }
 }

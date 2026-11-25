@@ -561,3 +561,30 @@ async fn a_party_has_a_dj_who_alone_passes_the_lead_and_only_followed_people_can
     call(reqwest::Method::PUT, "/blocks/bob".into(), a.clone()).await;
     assert_eq!(state(b.clone()).await["party"], Value::Null);
 }
+
+#[tokio::test]
+async fn any_emoji_can_be_a_reaction_and_a_whisper_is_seen_only_by_its_two_people() {
+    let s = start().await;
+    let (a, b, c) = (s.login("alice").await, s.login("bob").await, s.login("cara").await);
+    s.put_presence(&b, Service::song("Two")).await;
+    assert_eq!(s.react(&a, "bob", "s1", "emoji:🎉").await.status(), 204);
+    assert_eq!(s.react(&a, "bob", "s1", "emoji:hello").await.status(), 400);
+    let inbox: Vec<Value> = s.http.get(format!("{}/reactions", s.base)).bearer_auth(&b).send().await.unwrap().json().await.unwrap();
+    assert_eq!(inbox[0]["kind"], "emoji:🎉");
+    // Whispers: refused to yourself, to strangers and as replies; seen by the two only.
+    let whisper = |from: String, to: &str, body: &str| {
+        let (http, base, to, body) = (s.http.clone(), s.base.clone(), to.to_string(), body.to_string());
+        async move { http.post(format!("{base}/chat")).bearer_auth(from).json(&json!({"body": body, "to": to})).send().await.unwrap() }
+    };
+    assert_eq!(whisper(a.clone(), "alice", "hi").await.status(), 400);
+    assert_eq!(whisper(a.clone(), "nobody", "hi").await.status(), 404);
+    let r = whisper(a.clone(), "bob", "psst").await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap()["to"], "bob");
+    assert_eq!(s.messages(&a).await.len(), 1);
+    assert_eq!(s.messages(&b).await.len(), 1);
+    assert!(s.messages(&c).await.is_empty(), "cara must not see it");
+    // Blocking ends whispers both ways.
+    s.http.put(format!("{}/blocks/alice", s.base)).bearer_auth(&b).send().await.unwrap();
+    assert_eq!(whisper(a.clone(), "bob", "again").await.status(), 403);
+}

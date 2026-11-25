@@ -42,7 +42,7 @@ pub fn now_ms() -> u64 {
 pub enum Event {
     Presence { entry: activity_core::presence::PresenceEntry },
     PresenceEnded { user: String },
-    Reaction { from: String, to: String, song_id: String, kind: activity_core::ReactionKind },
+    Reaction { from: String, to: String, song_id: String, kind: String },
     Chat { message: activity_core::ChatMessage },
     ChatDeleted { id: i64 },
     /// Someone started listening along with `host` (told to the host).
@@ -64,7 +64,7 @@ impl Event {
             Event::Presence { entry } => entry.user != viewer && !either(&entry.user),
             Event::PresenceEnded { user } => user != viewer && !either(user),
             Event::Reaction { from, to, .. } => to == viewer && !blocked(from),
-            Event::Chat { message } => message.from != viewer && !blocked(&message.from),
+            Event::Chat { message } => message.from != viewer && !blocked(&message.from) && message.to.as_deref().is_none_or(|t| t == viewer),
             Event::ChatDeleted { .. } => true,
             Event::ListenerJoined { host, .. } | Event::ListenerLeft { host, .. } => host == viewer,
             Event::ListenEnded { listeners, .. } => listeners.iter().any(|l| l == viewer),
@@ -403,7 +403,10 @@ struct ReactionRequest {
 /// aimed at nothing), cannot be yourself, and must not have blocked you.
 async fn post_reaction(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<ReactionRequest>) -> ApiResult<StatusCode> {
     let user = authed(&state, &headers)?;
-    let kind = activity_core::ReactionKind::parse(&req.kind).ok_or(ApiError(StatusCode::BAD_REQUEST, "unknown reaction"))?;
+    if !activity_core::social::valid_reaction(&req.kind) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "unknown reaction"));
+    }
+    let kind = req.kind.clone();
     if req.to == user {
         return Err(ApiError(StatusCode::BAD_REQUEST, "you cannot react to yourself"));
     }
@@ -418,7 +421,7 @@ async fn post_reaction(State(state): State<AppState>, headers: HeaderMap, Json(r
             // Do not tell the sender they are blocked: the reaction simply goes nowhere.
             return Ok(StatusCode::NO_CONTENT);
         }
-        db::add_reaction(&conn, &user, &req.to, &req.song_id, kind.as_str(), now).map_err(internal)?
+        db::add_reaction(&conn, &user, &req.to, &req.song_id, &kind, now).map_err(internal)?
     };
     if is_new {
         let _ = state.events.send(Event::Reaction { from: user, to: req.to, song_id: req.song_id, kind });
@@ -448,6 +451,9 @@ struct ChatRequest {
     /// The id of the message this one replies to.
     #[serde(default)]
     reply_to: Option<i64>,
+    /// A whisper to this person: only they and the writer see it.
+    #[serde(default)]
+    to: Option<String>,
 }
 
 async fn post_chat(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<ChatRequest>) -> ApiResult<Json<activity_core::ChatMessage>> {
@@ -468,14 +474,28 @@ async fn post_chat(State(state): State<AppState>, headers: HeaderMap, Json(req):
                 return Err(ApiError(StatusCode::BAD_REQUEST, "that message is gone"));
             }
         }
-        let id = db::add_message(&conn, &user, &body, req.reply_to, now, activity_core::social::CHAT_KEEP_MS).map_err(internal)?;
+        if let Some(to) = &req.to {
+            if *to == user {
+                return Err(ApiError(StatusCode::BAD_REQUEST, "you cannot whisper to yourself"));
+            }
+            if req.reply_to.is_some() {
+                return Err(ApiError(StatusCode::BAD_REQUEST, "a whisper cannot be a reply"));
+            }
+            if !db::user_exists(&conn, to).map_err(internal)? {
+                return Err(ApiError(StatusCode::NOT_FOUND, "that person has not used the activity service yet"));
+            }
+            if db::is_blocked(&conn, &user, to).map_err(internal)? || db::is_blocked(&conn, to, &user).map_err(internal)? {
+                return Err(ApiError(StatusCode::FORBIDDEN, "you cannot whisper to that person"));
+            }
+        }
+        let id = db::add_message(&conn, &user, &body, req.reply_to, req.to.as_deref(), now, activity_core::social::CHAT_KEEP_MS).map_err(internal)?;
         let reply = match req.reply_to {
             Some(target) => Some(db::reply_ref(&conn, target).map_err(internal)?),
             None => None,
         };
         (id, reply)
     };
-    let message = activity_core::ChatMessage { id, from: user, body, created_at_ms: now, reply };
+    let message = activity_core::ChatMessage { id, from: user, body, created_at_ms: now, reply, to: req.to.clone() };
     let _ = state.events.send(Event::Chat { message: message.clone() });
     Ok(Json(message))
 }
