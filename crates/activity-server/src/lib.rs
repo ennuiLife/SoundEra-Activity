@@ -454,6 +454,9 @@ struct ChatRequest {
     /// A whisper to this person: only they and the writer see it.
     #[serde(default)]
     to: Option<String>,
+    /// A song suggested to `to` (a whisper that carries a song).
+    #[serde(default)]
+    song_id: Option<String>,
 }
 
 async fn post_chat(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<ChatRequest>) -> ApiResult<Json<activity_core::ChatMessage>> {
@@ -474,6 +477,9 @@ async fn post_chat(State(state): State<AppState>, headers: HeaderMap, Json(req):
                 return Err(ApiError(StatusCode::BAD_REQUEST, "that message is gone"));
             }
         }
+        if req.song_id.as_ref().is_some_and(|s| s.is_empty() || s.len() > 128 || s.chars().any(char::is_control)) || (req.song_id.is_some() && req.to.is_none()) {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "a suggestion needs a song and a person"));
+        }
         if let Some(to) = &req.to {
             if *to == user {
                 return Err(ApiError(StatusCode::BAD_REQUEST, "you cannot whisper to yourself"));
@@ -488,14 +494,14 @@ async fn post_chat(State(state): State<AppState>, headers: HeaderMap, Json(req):
                 return Err(ApiError(StatusCode::FORBIDDEN, "you cannot whisper to that person"));
             }
         }
-        let id = db::add_message(&conn, &user, &body, req.reply_to, req.to.as_deref(), now, activity_core::social::CHAT_KEEP_MS).map_err(internal)?;
+        let id = db::add_message(&conn, &user, &body, req.reply_to, req.to.as_deref(), req.song_id.as_deref(), now, activity_core::social::CHAT_KEEP_MS).map_err(internal)?;
         let reply = match req.reply_to {
             Some(target) => Some(db::reply_ref(&conn, target).map_err(internal)?),
             None => None,
         };
         (id, reply)
     };
-    let message = activity_core::ChatMessage { id, from: user, body, created_at_ms: now, reply, to: req.to.clone() };
+    let message = activity_core::ChatMessage { id, from: user, body, created_at_ms: now, reply, to: req.to.clone(), song_id: req.song_id.clone() };
     let _ = state.events.send(Event::Chat { message: message.clone() });
     Ok(Json(message))
 }

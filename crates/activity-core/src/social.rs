@@ -58,6 +58,9 @@ pub struct ChatMessage {
     /// A whisper: only the writer and this person see it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+    /// A song suggested in a whisper (its id; the body says what it is).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub song_id: Option<String>,
 }
 
 /// How much of the replied-to message is shown (in characters).

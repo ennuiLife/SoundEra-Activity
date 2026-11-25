@@ -588,3 +588,21 @@ async fn any_emoji_can_be_a_reaction_and_a_whisper_is_seen_only_by_its_two_peopl
     s.http.put(format!("{}/blocks/alice", s.base)).bearer_auth(&b).send().await.unwrap();
     assert_eq!(whisper(a.clone(), "bob", "again").await.status(), 403);
 }
+
+#[tokio::test]
+async fn a_song_suggestion_is_a_whisper_that_carries_the_song() {
+    let s = start().await;
+    let (a, b, c) = (s.login("alice").await, s.login("bob").await, s.login("cara").await);
+    let post = |from: String, body: Value| {
+        let (http, base) = (s.http.clone(), s.base.clone());
+        async move { http.post(format!("{base}/chat")).bearer_auth(from).json(&body).send().await.unwrap() }
+    };
+    // A song needs a person, and never goes to yourself.
+    assert_eq!(post(a.clone(), json!({"body": "Two", "song_id": "s1"})).await.status(), 400);
+    assert_eq!(post(a.clone(), json!({"body": "Two", "song_id": "s1", "to": "alice"})).await.status(), 400);
+    assert_eq!(post(a.clone(), json!({"body": "Two", "song_id": "", "to": "bob"})).await.status(), 400);
+    assert_eq!(post(a.clone(), json!({"body": "Two", "song_id": "s1", "to": "bob"})).await.status(), 200);
+    let got = s.messages(&b).await;
+    assert_eq!((got[0]["song_id"].as_str(), got[0]["to"].as_str()), (Some("s1"), Some("bob")));
+    assert!(s.messages(&c).await.is_empty());
+}

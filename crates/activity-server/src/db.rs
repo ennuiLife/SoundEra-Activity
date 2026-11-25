@@ -66,6 +66,10 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     if !has_to {
         conn.execute("ALTER TABLE messages ADD COLUMN to_user TEXT", [])?;
     }
+    let has_song: bool = conn.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'song_id'")?.exists([])?;
+    if !has_song {
+        conn.execute("ALTER TABLE messages ADD COLUMN song_id TEXT", [])?;
+    }
     Ok(())
 }
 
@@ -172,9 +176,10 @@ pub fn reactions_for(conn: &Connection, user: &str, since_ms: u64, limit: u32) -
 
 // ---- chat ----
 
-pub fn add_message(conn: &Connection, from: &str, body: &str, reply_to: Option<i64>, to: Option<&str>, now_ms: u64, keep_ms: u64) -> rusqlite::Result<i64> {
+#[allow(clippy::too_many_arguments)]
+pub fn add_message(conn: &Connection, from: &str, body: &str, reply_to: Option<i64>, to: Option<&str>, song_id: Option<&str>, now_ms: u64, keep_ms: u64) -> rusqlite::Result<i64> {
     conn.execute("DELETE FROM messages WHERE created_at < ?1", params![now_ms.saturating_sub(keep_ms) as i64])?;
-    conn.execute("INSERT INTO messages (from_user, body, reply_to, to_user, created_at) VALUES (?1, ?2, ?3, ?4, ?5)", params![from, body, reply_to, to, now_ms as i64])?;
+    conn.execute("INSERT INTO messages (from_user, body, reply_to, to_user, song_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![from, body, reply_to, to, song_id, now_ms as i64])?;
     Ok(conn.last_insert_rowid())
 }
 
@@ -202,15 +207,15 @@ pub fn message_exists(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
 /// The newest `limit` messages after id `after`, oldest first, leaving out people `viewer` has blocked.
 pub fn messages_for(conn: &Connection, viewer: &str, after: i64, limit: u32) -> rusqlite::Result<Vec<activity_core::ChatMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, from_user, body, created_at, reply_to, to_user FROM (
-            SELECT id, from_user, body, created_at, reply_to, to_user FROM messages
+        "SELECT id, from_user, body, created_at, reply_to, to_user, song_id FROM (
+            SELECT id, from_user, body, created_at, reply_to, to_user, song_id FROM messages
             WHERE id > ?2 AND from_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?1)
               AND (to_user IS NULL OR to_user = ?1 OR from_user = ?1)
             ORDER BY id DESC LIMIT ?3
          ) ORDER BY id",
     )?;
     let rows: Vec<(activity_core::ChatMessage, Option<i64>)> = stmt
-        .query_map(params![viewer, after, limit], |r| Ok((activity_core::ChatMessage { id: r.get(0)?, from: r.get(1)?, body: r.get(2)?, created_at_ms: r.get::<_, i64>(3)? as u64, reply: None, to: r.get(5)? }, r.get::<_, Option<i64>>(4)?)))?
+        .query_map(params![viewer, after, limit], |r| Ok((activity_core::ChatMessage { id: r.get(0)?, from: r.get(1)?, body: r.get(2)?, created_at_ms: r.get::<_, i64>(3)? as u64, reply: None, to: r.get(5)?, song_id: r.get(6)? }, r.get::<_, Option<i64>>(4)?)))?
         .collect::<rusqlite::Result<_>>()?;
     rows.into_iter()
         .map(|(mut m, reply_to)| {
