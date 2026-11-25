@@ -1,0 +1,52 @@
+# Push a tag like v0.2.0 to build a static Linux program, a checksum file and a Docker image.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  binary:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked -p activity-server --target x86_64-unknown-linux-musl
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="soundera-activity-${GITHUB_REF_NAME}-linux-x86_64"
+          mkdir "$name"
+          cp target/x86_64-unknown-linux-musl/release/soundera-activity LICENSE README.md "$name/"
+          cp -r deploy "$name/deploy"
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --title "SoundEra Activity $GITHUB_REF_NAME" --generate-notes soundera-activity-*.tar.gz SHA256SUMS
+  image:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Build and push
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/$owner/soundera-activity"
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -t "$image:$GITHUB_REF_NAME" -t "$image:latest" .
+          docker push "$image:$GITHUB_REF_NAME"
+          docker push "$image:latest"

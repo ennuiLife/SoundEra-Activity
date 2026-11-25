@@ -1,0 +1,4 @@
+# Caddy gets and renews the HTTPS certificate by itself. Replace the name with a domain that points at this server.
+activity.example.com {
+	reverse_proxy 127.0.0.1:4540
+}

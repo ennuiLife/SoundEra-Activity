@@ -40,6 +40,12 @@ pub enum Event {
     Reaction { from: String, to: String, song_id: String, kind: activity_core::ReactionKind },
     Chat { message: activity_core::ChatMessage },
     ChatDeleted { id: i64 },
+    /// Someone started listening along with `host` (told to the host).
+    ListenerJoined { host: String, listener: String },
+    /// A listener stopped (told to the host).
+    ListenerLeft { host: String, listener: String },
+    /// The host stopped playing or sharing, so everyone listening along is let go (told to those listeners).
+    ListenEnded { host: String, listeners: Vec<String> },
 }
 
 impl Event {
@@ -55,6 +61,8 @@ impl Event {
             Event::Reaction { from, to, .. } => to == viewer && !blocked(from),
             Event::Chat { message } => message.from != viewer && !blocked(&message.from),
             Event::ChatDeleted { .. } => true,
+            Event::ListenerJoined { host, .. } | Event::ListenerLeft { host, .. } => host == viewer,
+            Event::ListenEnded { listeners, .. } => listeners.iter().any(|l| l == viewer),
         }
     }
 }
@@ -69,12 +77,14 @@ pub struct AppState {
     http: reqwest::Client,
     fails: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
     chat_times: Arc<Mutex<HashMap<String, Vec<u64>>>>,
+    /// Who listens along with whom: listener -> host. In memory, like presence.
+    listens: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl AppState {
     pub fn new(config: Config, key: SessionKey, db: rusqlite::Connection) -> AppState {
         let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none()).build().expect("http client");
-        AppState { config: Arc::new(config), key, db: Arc::new(Mutex::new(db)), board: Arc::default(), events: broadcast::channel(256).0, http, fails: Arc::default(), chat_times: Arc::default() }
+        AppState { config: Arc::new(config), key, db: Arc::new(Mutex::new(db)), board: Arc::default(), events: broadcast::channel(256).0, http, fails: Arc::default(), chat_times: Arc::default(), listens: Arc::default() }
     }
 
     fn too_many_fails(&self, who: &str) -> bool {
@@ -104,6 +114,9 @@ pub fn router(state: AppState) -> Router {
         .route("/activity/v1/chat/{id}", axum::routing::delete(delete_chat))
         .route("/activity/v1/blocks", get(list_blocks))
         .route("/activity/v1/blocks/{user}", put(block_user).delete(unblock_user))
+        .route("/activity/v1/listen", get(listen_state).delete(listen_leave))
+        .route("/activity/v1/listen/{host}", put(listen_join))
+        .route("/activity/v1/health", get(health))
         .route("/activity/v1/ws", get(ws))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(state)
@@ -217,6 +230,77 @@ fn end_presence(state: &AppState, user: &str) {
     if state.board.lock().unwrap().remove(user) {
         let _ = state.events.send(Event::PresenceEnded { user: user.to_string() });
     }
+    release_listeners(state, user);
+}
+
+/// Everyone who listened along with `host` is let go (the host stopped, or blocked or was blocked).
+fn release_listeners(state: &AppState, host: &str) {
+    let gone: Vec<String> = {
+        let mut listens = state.listens.lock().unwrap();
+        let gone: Vec<String> = listens.iter().filter(|(_, h)| h.as_str() == host).map(|(l, _)| l.clone()).collect();
+        for l in &gone {
+            listens.remove(l);
+        }
+        gone
+    };
+    if !gone.is_empty() {
+        let _ = state.events.send(Event::ListenEnded { host: host.to_string(), listeners: gone });
+    }
+}
+
+#[derive(Serialize)]
+struct Health {
+    status: &'static str,
+    version: &'static str,
+}
+
+/// For load balancers and Docker health checks: no login, and nothing but the version.
+async fn health() -> Json<Health> {
+    Json(Health { status: "ok", version: env!("CARGO_PKG_VERSION") })
+}
+
+#[derive(Serialize)]
+struct ListenState {
+    listening_to: Option<String>,
+    listeners: Vec<String>,
+}
+
+/// Listen along with someone who is playing now: you get their current presence back (to start in step) and from
+/// then on their presence updates (song, position, play or pause) are what to follow. They are told you joined.
+async fn listen_join(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(host): axum::extract::Path<String>) -> ApiResult<Json<activity_core::presence::PresenceEntry>> {
+    let user = authed(&state, &headers)?;
+    if host == user {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "you cannot listen along with yourself"));
+    }
+    let mut live = state.board.lock().unwrap().visible_to(&user, now_ms());
+    hide_blocked(&state, &user, &mut live);
+    let entry = live.into_iter().find(|e| e.user == host).ok_or(ApiError(StatusCode::CONFLICT, "that person is not playing anything you can join"))?;
+    let previous = state.listens.lock().unwrap().insert(user.clone(), host.clone());
+    if let Some(old) = previous.filter(|o| *o != host) {
+        let _ = state.events.send(Event::ListenerLeft { host: old, listener: user.clone() });
+    }
+    let _ = state.events.send(Event::ListenerJoined { host, listener: user });
+    Ok(Json(entry))
+}
+
+async fn listen_leave(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<StatusCode> {
+    let user = authed(&state, &headers)?;
+    if let Some(host) = state.listens.lock().unwrap().remove(&user) {
+        let _ = state.events.send(Event::ListenerLeft { host, listener: user });
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Who you listen along with, and who listens along with you (only while those people still play).
+async fn listen_state(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<ListenState>> {
+    let user = authed(&state, &headers)?;
+    let playing: std::collections::HashSet<String> = state.board.lock().unwrap().visible_to("", now_ms()).into_iter().map(|e| e.user).collect();
+    let mut listens = state.listens.lock().unwrap();
+    listens.retain(|_, host| playing.contains(host));
+    let listening_to = listens.get(&user).cloned();
+    let mut listeners: Vec<String> = listens.iter().filter(|(_, h)| **h == user).map(|(l, _)| l.clone()).collect();
+    listeners.sort();
+    Ok(Json(ListenState { listening_to, listeners }))
 }
 
 async fn put_presence(State(state): State<AppState>, headers: HeaderMap, Json(update): Json<PresenceUpdate>) -> ApiResult<StatusCode> {
@@ -402,6 +486,20 @@ async fn block_user(State(state): State<AppState>, headers: HeaderMap, axum::ext
     // Blocking also ends following in both directions.
     let _ = db::unfollow(&conn, &user, &target);
     let _ = db::unfollow(&conn, &target, &user);
+    drop(conn);
+    // ...and listening along, both ways.
+    let was_mine = {
+        let mut listens = state.listens.lock().unwrap();
+        let mine = (listens.get(&user).map(String::as_str) == Some(target.as_str())).then(|| listens.remove(&user)).flatten();
+        let theirs = (listens.get(&target).map(String::as_str) == Some(user.as_str())).then(|| listens.remove(&target)).flatten();
+        (mine, theirs)
+    };
+    if was_mine.0.is_some() {
+        let _ = state.events.send(Event::ListenerLeft { host: target.clone(), listener: user.clone() });
+    }
+    if was_mine.1.is_some() {
+        let _ = state.events.send(Event::ListenerLeft { host: user.clone(), listener: target.clone() });
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -4,7 +4,7 @@ A small Rust service that runs **next to** a Navidrome (OpenSubsonic) server and
 Navidrome cannot: richer presence, follows, reactions, chat and "listen together". People keep their Navidrome and
 their library. SoundEra gets one setting (the service address) and falls back to plain `getNowPlaying` without it.
 
-Status: weeks 1 to 3 built (week 3: reactions, chat, blocking, all on the service; no SoundEra screens for them yet) (login, presence, follows and feed on the service; SoundEra setting for the address, sending and reading presence with fallback). Nothing published. Fictional data only in tests and docs.
+Status: weeks 1 to 4 built: login, presence, follows, reactions, chat, blocking and listen together on the service; SoundEra has screens for all but listen together; packaging (Docker, systemd, proxy examples, CI and release workflows) is in `deploy/` and `.github/` (login, presence, follows and feed on the service; SoundEra setting for the address, sending and reading presence with fallback). Nothing published. Fictional data only in tests and docs.
 
 ## 1. Features, in priority order
 

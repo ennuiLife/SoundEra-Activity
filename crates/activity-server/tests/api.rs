@@ -331,3 +331,70 @@ async fn blocking_hides_chat_reactions_presence_and_follows_both_ways() {
     assert_eq!(s.messages(&a).await.len(), 1);
     assert_eq!(s.presence(&a).await.len(), 1);
 }
+
+impl Service {
+    async fn listen_state(&self, session: &str) -> Value {
+        self.http.get(format!("{}/listen", self.base)).bearer_auth(session).send().await.unwrap().json().await.unwrap()
+    }
+}
+
+#[tokio::test]
+async fn health_needs_no_login_and_says_only_the_version() {
+    let s = start().await;
+    let v: Value = s.http.get(format!("{}/health", s.base)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["status"], "ok");
+    assert!(v["version"].as_str().is_some_and(|x| !x.is_empty()));
+    assert_eq!(v.as_object().unwrap().len(), 2, "nothing else is revealed");
+}
+
+#[tokio::test]
+async fn listening_along_needs_someone_playing_and_tells_the_host() {
+    let s = start().await;
+    let (a, b) = (s.login("alice").await, s.login("bob").await);
+    let url = |session: &str| s.base.replace("http://", "ws://") + &format!("/ws?session={session}");
+    let (mut ws_b, _) = tokio_tungstenite::connect_async(url(&b)).await.unwrap();
+    // Nobody playing, or yourself: refused.
+    assert_eq!(s.http.put(format!("{}/listen/bob", s.base)).bearer_auth(&a).send().await.unwrap().status(), 409);
+    assert_eq!(s.http.put(format!("{}/listen/alice", s.base)).bearer_auth(&a).send().await.unwrap().status(), 400);
+    s.put_presence(&b, Service::song("Two")).await;
+    let r = s.http.put(format!("{}/listen/bob", s.base)).bearer_auth(&a).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let entry: Value = r.json().await.unwrap();
+    assert_eq!((entry["user"].as_str(), entry["title"].as_str(), entry["position_ms"].as_u64()), (Some("bob"), Some("Two"), Some(5000)));
+    assert_eq!(next_event(&mut ws_b).await, json!({"type": "listener_joined", "host": "bob", "listener": "alice"}));
+    assert_eq!(s.listen_state(&a).await, json!({"listening_to": "bob", "listeners": []}));
+    assert_eq!(s.listen_state(&b).await, json!({"listening_to": null, "listeners": ["alice"]}));
+    // Leaving tells the host and clears it.
+    assert_eq!(s.http.delete(format!("{}/listen", s.base)).bearer_auth(&a).send().await.unwrap().status(), 204);
+    assert_eq!(next_event(&mut ws_b).await, json!({"type": "listener_left", "host": "bob", "listener": "alice"}));
+    assert_eq!(s.listen_state(&b).await["listeners"], json!([]));
+}
+
+#[tokio::test]
+async fn listeners_are_let_go_when_the_host_stops_or_blocks() {
+    let s = start().await;
+    let (a, b) = (s.login("alice").await, s.login("bob").await);
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(s.base.replace("http://", "ws://") + &format!("/ws?session={a}")).await.unwrap();
+    s.put_presence(&b, Service::song("Two")).await;
+    assert_eq!(next_event(&mut ws_a).await["type"], "presence");
+    s.http.put(format!("{}/listen/bob", s.base)).bearer_auth(&a).send().await.unwrap();
+    // The host stops: the listener is told and the listening is gone.
+    s.http.delete(format!("{}/presence", s.base)).bearer_auth(&b).send().await.unwrap();
+    let mut seen_end = false;
+    for _ in 0..3 {
+        let v = next_event(&mut ws_a).await;
+        if v["type"] == "listen_ended" {
+            assert_eq!(v, json!({"type": "listen_ended", "host": "bob", "listeners": ["alice"]}));
+            seen_end = true;
+            break;
+        }
+    }
+    assert!(seen_end, "alice was told the listening ended");
+    assert_eq!(s.listen_state(&a).await["listening_to"], json!(null));
+    // Blocking ends it too, in either direction, and joining a blocker is refused.
+    s.put_presence(&b, Service::song("Two")).await;
+    s.http.put(format!("{}/listen/bob", s.base)).bearer_auth(&a).send().await.unwrap();
+    s.http.put(format!("{}/blocks/alice", s.base)).bearer_auth(&b).send().await.unwrap();
+    assert_eq!(s.listen_state(&a).await["listening_to"], json!(null));
+    assert_eq!(s.http.put(format!("{}/listen/bob", s.base)).bearer_auth(&a).send().await.unwrap().status(), 409);
+}

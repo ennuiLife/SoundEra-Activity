@@ -1,0 +1,20 @@
+# Run SoundEra Activity next to Navidrome. Put a reverse proxy (see Caddyfile) in front of it: the port is only
+# published on this machine's own address.
+services:
+  activity:
+    image: ghcr.io/ennuilife/soundera-activity:latest
+    # Or build it yourself from a clone of the repository:
+    # build: ..
+    restart: unless-stopped
+    environment:
+      # Where Navidrome listens, as seen from this container.
+      NAVIDROME_URL: http://navidrome:4533
+    volumes:
+      - activity-data:/data
+    ports:
+      - "127.0.0.1:4540:4540"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+volumes:
+  activity-data:

@@ -1,0 +1,34 @@
+[Unit]
+Description=SoundEra Activity (live presence, chat and follows next to Navidrome)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Where Navidrome listens, as seen from this machine.
+Environment=NAVIDROME_URL=http://127.0.0.1:4533
+Environment=BIND=127.0.0.1:4540
+Environment=DATA_DIR=/var/lib/soundera-activity
+ExecStart=/usr/local/bin/soundera-activity
+Restart=on-failure
+RestartSec=3
+
+# A private user and a private data folder, and nothing else it does not need.
+DynamicUser=yes
+StateDirectory=soundera-activity
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
