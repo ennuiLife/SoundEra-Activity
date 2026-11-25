@@ -46,6 +46,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             blocked TEXT NOT NULL,
             PRIMARY KEY (blocker, blocked)
         );
+        CREATE TABLE IF NOT EXISTS avatars (
+            user TEXT PRIMARY KEY,
+            png BLOB NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS profiles (
             user TEXT PRIMARY KEY,
             summary TEXT NOT NULL,
@@ -235,4 +240,23 @@ pub fn get_profile(conn: &Connection, user: &str) -> rusqlite::Result<Option<(St
 pub fn delete_profile(conn: &Connection, user: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM profiles WHERE user = ?1", params![user])?;
     Ok(())
+}
+
+// ---- avatars ----
+
+pub fn put_avatar(conn: &Connection, user: &str, png: &[u8], now_ms: u64) -> rusqlite::Result<()> {
+    conn.execute("INSERT INTO avatars (user, png, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(user) DO UPDATE SET png = ?2, updated_at = ?3", params![user, png, now_ms as i64])?;
+    Ok(())
+}
+
+pub fn get_avatar(conn: &Connection, user: &str) -> rusqlite::Result<Option<(Vec<u8>, u64)>> {
+    match conn.query_row("SELECT png, updated_at FROM avatars WHERE user = ?1", params![user], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)? as u64))) {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn delete_avatar(conn: &Connection, user: &str) -> rusqlite::Result<bool> {
+    Ok(conn.execute("DELETE FROM avatars WHERE user = ?1", params![user])? > 0)
 }

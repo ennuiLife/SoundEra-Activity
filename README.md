@@ -35,6 +35,7 @@ SoundEra  ──HTTPS──►  your reverse proxy  ──►  SoundEra Activity
 | **Follows** | Follow people; show only the people you follow. |
 | **Reactions** | React to what someone is playing right now with like, fire, sad or laugh. They only reach the person, and only while they play that very song. |
 | **Chat** | One chat room for the whole server. 500 characters a message, a few messages per ten seconds, history kept 30 days. You can reply to a message (the reply carries a short look at the one it answers) and delete your own messages. |
+| **Pictures** | Each person can set a profile picture (Navidrome cannot store one). Send any PNG or JPEG up to 4 MB; the service keeps a 256 px square PNG made from the middle of it. Everyone using the service sees it. |
 | **Profiles** | Each person can share a small summary (plays, liked songs and playlists counts, top five artists and genres) so others can open their profile. Nothing else about the library is sent. Switching sharing off removes it. |
 | **Blocking** | Block someone: you stop seeing their presence, reactions and chat, they stop seeing yours, follows end, and listening along ends. They are not told. |
 | **Listen together** | Join someone who is playing: you get their song and position to start in step, they are told you joined, and you are let go when they stop. |
@@ -184,7 +185,7 @@ What the service **sees and keeps**:
 |---|---|
 | Sees, never keeps | Your Navidrome token and salt, once, at sign-in. |
 | Keeps in memory only | What each person plays now (forgotten after 90 seconds without an update, and on restart), who listens along with whom. |
-| Keeps on disk | User names (from Navidrome), who follows or blocked whom, chat messages and replies (30 days), reactions (as received), each person's profile summary (numbers and the top five artist and genre names). |
+| Keeps on disk | User names (from Navidrome), who follows or blocked whom, chat messages and replies (30 days), reactions (as received), each person's profile summary (numbers and the top five artist and genre names) and the picture they chose (a small PNG). |
 | Never has | Passwords, your music library, file names, IP addresses in the database. |
 
 How it protects you:
@@ -275,6 +276,7 @@ are `{"error": "..."}` with a fitting status code.
 | `GET /follows`, `PUT/DELETE /follows/{user}`, `GET /feed` | Who you follow and who follows you; follow or stop; what the people you follow play now. |
 | `POST /reactions` `{to, song_id, kind}`, `GET /reactions` | `kind` is `like`, `fire`, `sad` or `laugh`. The person must be playing `song_id` now (409 otherwise). The inbox lists the last 7 days. |
 | `GET /chat?after=ID&limit=N`, `POST /chat` `{body, reply_to?}`, `DELETE /chat/{id}` | The room. `reply_to` is the id of the message answered (400 if it is gone); a reply carries `reply: {id, from, body}` with the first 120 characters (`from` and `body` are `null` once the original was deleted). Only the writer can delete (404 otherwise). |
+| `PUT /avatar` (the image as the body), `DELETE /avatar`, `GET /avatar/{user}` | Set, remove and read profile pictures. Only PNG and JPEG are accepted (400 otherwise, 413 over 4 MB); the image is decoded with limits, cropped to the middle square and stored as a 256 px PNG. A person's picture is hidden (404) from someone who blocked them or whom they blocked. |
 | `PUT /profile` `{plays, liked, playlists, top_artists[], top_genres[]}`, `GET /profile/{user}` | Share your own summary (at most five `{name, plays}` entries each; 403 while sharing is off) and read someone else's: `{user, summary, updated_at_ms, followers, following, you_follow, playing_now}`. 404 when they share nothing, or when either of you blocked the other. |
 | `PUT/DELETE /blocks/{user}`, `GET /blocks` | Block, unblock, list. |
 | `PUT /listen/{host}`, `DELETE /listen`, `GET /listen` | Listen along with someone playing now (returns their presence); leave; who you follow along and who follows along with you. |

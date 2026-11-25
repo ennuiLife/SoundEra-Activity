@@ -28,6 +28,10 @@ const LOGIN_FAILS_MAX: u32 = 5;
 const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 const MAX_NAME: usize = 128;
 const MAX_SECRET: usize = 512;
+/// The biggest picture a person may upload (the service keeps a small square PNG made from it).
+const MAX_AVATAR_UPLOAD: usize = 4 * 1024 * 1024;
+/// The side of the stored square picture.
+const AVATAR_SIDE: u32 = 256;
 
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
@@ -115,6 +119,8 @@ pub fn router(state: AppState) -> Router {
         .route("/activity/v1/chat/{id}", axum::routing::delete(delete_chat))
         .route("/activity/v1/profile", put(put_profile))
         .route("/activity/v1/profile/{user}", get(get_profile))
+        .route("/activity/v1/avatar", put(put_avatar).delete(delete_avatar).layer(DefaultBodyLimit::max(MAX_AVATAR_UPLOAD)))
+        .route("/activity/v1/avatar/{user}", get(get_avatar))
         .route("/activity/v1/blocks", get(list_blocks))
         .route("/activity/v1/blocks/{user}", put(block_user).delete(unblock_user))
         .route("/activity/v1/listen", get(listen_state).delete(listen_leave))
@@ -510,6 +516,58 @@ async fn get_profile(State(state): State<AppState>, headers: HeaderMap, axum::ex
     };
     let playing_now = state.board.lock().unwrap().visible_to(&user, now_ms()).iter().any(|e| e.user == target);
     Ok(Json(ProfileOut { user: target, summary, updated_at_ms, followers, following, you_follow, playing_now }))
+}
+
+/// Turn an uploaded picture (PNG or JPEG, any size up to the limits) into a small square PNG, or say why not.
+fn make_avatar(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
+    use image::{ImageFormat, ImageReader};
+    let mut reader = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|_| "that is not a picture")?;
+    if !matches!(reader.format(), Some(ImageFormat::Png) | Some(ImageFormat::Jpeg)) {
+        return Err("only PNG and JPEG pictures are accepted");
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    let picture = reader.decode().map_err(|_| "that picture could not be read")?;
+    let (w, h) = (picture.width(), picture.height());
+    if w == 0 || h == 0 {
+        return Err("that picture is empty");
+    }
+    // The middle square, made small.
+    let side = w.min(h);
+    let square = picture.crop_imm((w - side) / 2, (h - side) / 2, side, side).resize_exact(AVATAR_SIDE, AVATAR_SIDE, image::imageops::FilterType::Lanczos3);
+    let mut out = std::io::Cursor::new(Vec::new());
+    square.write_to(&mut out, ImageFormat::Png).map_err(|_| "that picture could not be saved")?;
+    Ok(out.into_inner())
+}
+
+/// Set your own picture: send a PNG or JPEG as the request body (up to 4 MB).
+async fn put_avatar(State(state): State<AppState>, headers: HeaderMap, body: axum::body::Bytes) -> ApiResult<StatusCode> {
+    let user = authed(&state, &headers)?;
+    let png = make_avatar(&body).map_err(|m| ApiError(StatusCode::BAD_REQUEST, m))?;
+    let conn = state.db.lock().unwrap();
+    db::touch_user(&conn, &user, now_ms() / 1000).map_err(internal)?;
+    db::put_avatar(&conn, &user, &png, now_ms()).map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_avatar(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<StatusCode> {
+    let user = authed(&state, &headers)?;
+    db::delete_avatar(&state.db.lock().unwrap(), &user).map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Someone's picture as a PNG (404 when they have none, or when either of you blocked the other).
+async fn get_avatar(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(target): axum::extract::Path<String>) -> ApiResult<Response> {
+    let user = authed(&state, &headers)?;
+    let conn = state.db.lock().unwrap();
+    if target != user && (db::is_blocked(&conn, &user, &target).map_err(internal)? || db::is_blocked(&conn, &target, &user).map_err(internal)?) {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no picture"));
+    }
+    let Some((png, at)) = db::get_avatar(&conn, &target).map_err(internal)? else { return Err(ApiError(StatusCode::NOT_FOUND, "no picture")) };
+    Ok(([(header::CONTENT_TYPE, "image/png".to_string()), (header::ETAG, format!("\"{at}\"")), (header::CACHE_CONTROL, "private, max-age=60".to_string())], png).into_response())
 }
 
 #[derive(Deserialize)]

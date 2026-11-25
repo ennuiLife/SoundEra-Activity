@@ -25,7 +25,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
 minisign-verify = "0.2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 tower = "0.5"
 tokio-tungstenite = "0.29"

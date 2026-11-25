@@ -469,3 +469,48 @@ async fn a_profile_is_shared_seen_by_others_and_gone_when_sharing_stops() {
     assert_eq!(get(a.clone(), "bob").await.status(), 404);
     assert_eq!(put(b.clone(), summary()).await, 403);
 }
+
+/// A real (tiny) picture, made here, so the tests need no files.
+fn picture(format: image::ImageFormat, w: u32, h: u32) -> Vec<u8> {
+    let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])));
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, format).unwrap();
+    out.into_inner()
+}
+
+#[tokio::test]
+async fn a_picture_is_made_square_small_and_served_to_others() {
+    let s = start().await;
+    let (a, b) = (s.login("alice").await, s.login("bob").await);
+    let put = |session: String, bytes: Vec<u8>| {
+        let (http, base) = (s.http.clone(), s.base.clone());
+        async move { http.put(format!("{base}/avatar")).bearer_auth(session).body(bytes).send().await.unwrap() }
+    };
+    let get = |session: String, who: &'static str| {
+        let (http, base) = (s.http.clone(), s.base.clone());
+        async move { http.get(format!("{base}/avatar/{who}")).bearer_auth(session).send().await.unwrap() }
+    };
+    assert_eq!(get(a.clone(), "bob").await.status(), 404, "no picture yet");
+    // A wide JPEG becomes a 256 x 256 PNG.
+    assert_eq!(put(b.clone(), picture(image::ImageFormat::Jpeg, 640, 300)).await.status(), 204);
+    let r = get(a.clone(), "bob").await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["content-type"], "image/png");
+    let png = r.bytes().await.unwrap();
+    let decoded = image::load_from_memory(&png).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (256, 256));
+    // Not a picture, a wrong format, and a nothing are refused; it needs a login.
+    assert_eq!(put(b.clone(), b"definitely not a picture".to_vec()).await.status(), 400);
+    assert_eq!(put(b.clone(), picture(image::ImageFormat::Gif, 8, 8)).await.status(), 400);
+    assert_eq!(put(b.clone(), Vec::new()).await.status(), 400);
+    assert_eq!(s.http.get(format!("{}/avatar/bob", s.base)).send().await.unwrap().status(), 401);
+    // A huge upload is stopped before it is read.
+    assert_eq!(put(b.clone(), vec![0u8; 5 * 1024 * 1024]).await.status(), 413);
+    // Blocking hides it, and removing it removes it.
+    s.http.put(format!("{}/blocks/bob", s.base)).bearer_auth(&a).send().await.unwrap();
+    assert_eq!(get(a.clone(), "bob").await.status(), 404);
+    s.http.delete(format!("{}/blocks/bob", s.base)).bearer_auth(&a).send().await.unwrap();
+    assert_eq!(get(a.clone(), "bob").await.status(), 200);
+    assert_eq!(s.http.delete(format!("{}/avatar", s.base)).bearer_auth(&b).send().await.unwrap().status(), 204);
+    assert_eq!(get(a.clone(), "bob").await.status(), 404);
+}
