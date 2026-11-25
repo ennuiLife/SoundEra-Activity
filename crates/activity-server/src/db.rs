@@ -45,8 +45,19 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             blocker TEXT NOT NULL,
             blocked TEXT NOT NULL,
             PRIMARY KEY (blocker, blocked)
+        );
+        CREATE TABLE IF NOT EXISTS profiles (
+            user TEXT PRIMARY KEY,
+            summary TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
         );",
-    )
+    )?;
+    // Databases made before chat replies existed get the column (the table is the same otherwise).
+    let has_reply: bool = conn.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'reply_to'")?.exists([])?;
+    if !has_reply {
+        conn.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER", [])?;
+    }
+    Ok(())
 }
 
 /// Make sure the user exists (sharing is on by default, as everyone on the server sees everyone today).
@@ -152,26 +163,76 @@ pub fn reactions_for(conn: &Connection, user: &str, since_ms: u64, limit: u32) -
 
 // ---- chat ----
 
-pub fn add_message(conn: &Connection, from: &str, body: &str, now_ms: u64, keep_ms: u64) -> rusqlite::Result<i64> {
+pub fn add_message(conn: &Connection, from: &str, body: &str, reply_to: Option<i64>, now_ms: u64, keep_ms: u64) -> rusqlite::Result<i64> {
     conn.execute("DELETE FROM messages WHERE created_at < ?1", params![now_ms.saturating_sub(keep_ms) as i64])?;
-    conn.execute("INSERT INTO messages (from_user, body, created_at) VALUES (?1, ?2, ?3)", params![from, body, now_ms as i64])?;
+    conn.execute("INSERT INTO messages (from_user, body, reply_to, created_at) VALUES (?1, ?2, ?3, ?4)", params![from, body, reply_to, now_ms as i64])?;
     Ok(conn.last_insert_rowid())
+}
+
+fn preview(body: &str) -> String {
+    body.chars().take(activity_core::social::REPLY_PREVIEW_CHARS).collect()
+}
+
+/// A short look at message `id` for a reply: who wrote it and its first words; both `None` when it is gone.
+pub fn reply_ref(conn: &Connection, id: i64) -> rusqlite::Result<activity_core::ReplyRef> {
+    let found = conn.query_row("SELECT from_user, body FROM messages WHERE id = ?1", params![id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
+    match found {
+        Ok((from, body)) => Ok(activity_core::ReplyRef { id, from: Some(from), body: Some(preview(&body)) }),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(activity_core::ReplyRef { id, from: None, body: None }),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn message_exists(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT 1 FROM messages WHERE id = ?1", params![id], |_| Ok(())).map(|_| true).or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(false),
+        e => Err(e),
+    })
 }
 
 /// The newest `limit` messages after id `after`, oldest first, leaving out people `viewer` has blocked.
 pub fn messages_for(conn: &Connection, viewer: &str, after: i64, limit: u32) -> rusqlite::Result<Vec<activity_core::ChatMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, from_user, body, created_at FROM (
-            SELECT id, from_user, body, created_at FROM messages
+        "SELECT id, from_user, body, created_at, reply_to FROM (
+            SELECT id, from_user, body, created_at, reply_to FROM messages
             WHERE id > ?2 AND from_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?1)
             ORDER BY id DESC LIMIT ?3
          ) ORDER BY id",
     )?;
-    let rows = stmt.query_map(params![viewer, after, limit], |r| Ok(activity_core::ChatMessage { id: r.get(0)?, from: r.get(1)?, body: r.get(2)?, created_at_ms: r.get::<_, i64>(3)? as u64 }))?;
-    rows.collect()
+    let rows: Vec<(activity_core::ChatMessage, Option<i64>)> = stmt
+        .query_map(params![viewer, after, limit], |r| Ok((activity_core::ChatMessage { id: r.get(0)?, from: r.get(1)?, body: r.get(2)?, created_at_ms: r.get::<_, i64>(3)? as u64, reply: None }, r.get::<_, Option<i64>>(4)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    rows.into_iter()
+        .map(|(mut m, reply_to)| {
+            if let Some(id) = reply_to {
+                m.reply = Some(reply_ref(conn, id)?);
+            }
+            Ok(m)
+        })
+        .collect()
 }
 
 /// Delete a message, but only if `user` wrote it. Returns whether one was deleted.
 pub fn delete_own_message(conn: &Connection, user: &str, id: i64) -> rusqlite::Result<bool> {
     Ok(conn.execute("DELETE FROM messages WHERE id = ?1 AND from_user = ?2", params![id, user])? > 0)
+}
+
+// ---- profiles ----
+
+pub fn put_profile(conn: &Connection, user: &str, summary_json: &str, now_ms: u64) -> rusqlite::Result<()> {
+    conn.execute("INSERT INTO profiles (user, summary, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(user) DO UPDATE SET summary = ?2, updated_at = ?3", params![user, summary_json, now_ms as i64])?;
+    Ok(())
+}
+
+pub fn get_profile(conn: &Connection, user: &str) -> rusqlite::Result<Option<(String, u64)>> {
+    match conn.query_row("SELECT summary, updated_at FROM profiles WHERE user = ?1", params![user], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))) {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn delete_profile(conn: &Connection, user: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM profiles WHERE user = ?1", params![user])?;
+    Ok(())
 }

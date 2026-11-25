@@ -398,3 +398,74 @@ async fn listeners_are_let_go_when_the_host_stops_or_blocks() {
     assert_eq!(s.listen_state(&a).await["listening_to"], json!(null));
     assert_eq!(s.http.put(format!("{}/listen/bob", s.base)).bearer_auth(&a).send().await.unwrap().status(), 409);
 }
+
+#[tokio::test]
+async fn a_chat_reply_carries_a_short_look_at_the_message_it_answers() {
+    let s = start().await;
+    let (a, b) = (s.login("alice").await, s.login("bob").await);
+    let first: Value = s.chat(&a, "Who wants to hear the new album tonight?").await.json().await.unwrap();
+    let id = first["id"].as_i64().unwrap();
+    assert!(first.get("reply").is_none(), "a plain message has no reply field");
+    let r = s.http.post(format!("{}/chat", s.base)).bearer_auth(&b).json(&json!({"body": "Me!", "reply_to": id})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let reply: Value = r.json().await.unwrap();
+    assert_eq!(reply["reply"], json!({"id": id, "from": "alice", "body": "Who wants to hear the new album tonight?"}));
+    // The list carries it too, and a gone message is said to be gone instead of being invented.
+    let list = s.messages(&a).await;
+    assert_eq!(list[1]["reply"]["from"], "alice");
+    assert_eq!(s.http.delete(format!("{}/chat/{id}", s.base)).bearer_auth(&a).send().await.unwrap().status(), 204);
+    let list = s.messages(&b).await;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["reply"], json!({"id": id, "from": null, "body": null}));
+    // Replying to a message that does not exist is refused.
+    let r = s.http.post(format!("{}/chat", s.base)).bearer_auth(&b).json(&json!({"body": "hello?", "reply_to": 9999})).send().await.unwrap();
+    assert_eq!(r.status(), 400);
+}
+
+#[tokio::test]
+async fn a_chat_reply_is_pushed_live_with_its_reference() {
+    let s = start().await;
+    let (a, b) = (s.login("alice").await, s.login("bob").await);
+    let id = s.chat(&a, "first").await.json::<Value>().await.unwrap()["id"].as_i64().unwrap();
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(s.base.replace("http://", "ws://") + &format!("/ws?session={a}")).await.unwrap();
+    s.http.post(format!("{}/chat", s.base)).bearer_auth(&b).json(&json!({"body": "second", "reply_to": id})).send().await.unwrap();
+    let v = next_event(&mut ws_a).await;
+    assert_eq!((v["type"].as_str(), v["message"]["reply"]["body"].as_str()), (Some("chat"), Some("first")));
+}
+
+fn summary() -> Value {
+    json!({"plays": 654, "liked": 16, "playlists": 5, "top_artists": [{"name": "Fictional Band", "plays": 89}], "top_genres": [{"name": "Ambient", "plays": 40}]})
+}
+
+#[tokio::test]
+async fn a_profile_is_shared_seen_by_others_and_gone_when_sharing_stops() {
+    let s = start().await;
+    let (a, b) = (s.login("alice").await, s.login("bob").await);
+    let put = |session: String, body: Value| {
+        let (http, base) = (s.http.clone(), s.base.clone());
+        async move { http.put(format!("{base}/profile")).bearer_auth(session).json(&body).send().await.unwrap().status() }
+    };
+    let get = |session: String, who: &'static str| {
+        let (http, base) = (s.http.clone(), s.base.clone());
+        async move { http.get(format!("{base}/profile/{who}")).bearer_auth(session).send().await.unwrap() }
+    };
+    assert_eq!(get(a.clone(), "bob").await.status(), 404, "nothing shared yet");
+    assert_eq!(put(b.clone(), summary()).await, 204);
+    s.http.put(format!("{}/follows/bob", s.base)).bearer_auth(&a).send().await.unwrap();
+    s.put_presence(&b, Service::song("Two")).await;
+    let v: Value = get(a.clone(), "bob").await.json().await.unwrap();
+    assert_eq!((v["user"].as_str(), v["summary"]["plays"].as_u64(), v["summary"]["top_artists"][0]["name"].as_str()), (Some("bob"), Some(654), Some("Fictional Band")));
+    assert_eq!((v["followers"].as_u64(), v["you_follow"].as_bool(), v["playing_now"].as_bool()), (Some(1), Some(true), Some(true)), "alice follows bob: bob has one follower, and you_follow is true for alice");
+    // Bad input is refused.
+    let mut bad = summary();
+    bad["top_artists"] = json!((0..6).map(|i| json!({"name": format!("a{i}"), "plays": 1})).collect::<Vec<_>>());
+    assert_eq!(put(b.clone(), bad).await, 400);
+    // Blocking hides it both ways; switching sharing off removes it.
+    s.http.put(format!("{}/blocks/bob", s.base)).bearer_auth(&a).send().await.unwrap();
+    assert_eq!(get(a.clone(), "bob").await.status(), 404);
+    s.http.delete(format!("{}/blocks/bob", s.base)).bearer_auth(&a).send().await.unwrap();
+    assert_eq!(get(a.clone(), "bob").await.status(), 200);
+    s.http.put(format!("{}/me/settings", s.base)).bearer_auth(&b).json(&json!({"share_presence": false})).send().await.unwrap();
+    assert_eq!(get(a.clone(), "bob").await.status(), 404);
+    assert_eq!(put(b.clone(), summary()).await, 403);
+}

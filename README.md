@@ -34,7 +34,8 @@ SoundEra  ──HTTPS──►  your reverse proxy  ──►  SoundEra Activity
 | **Presence** | Everyone sees what the others on the server play right now: song, artist, how long ago, on which device. Updates arrive live. You can switch sharing off at any time, and you disappear at once. |
 | **Follows** | Follow people; show only the people you follow. |
 | **Reactions** | React to what someone is playing right now with like, fire, sad or laugh. They only reach the person, and only while they play that very song. |
-| **Chat** | One chat room for the whole server. 500 characters a message, a few messages per ten seconds, history kept 30 days. You can delete your own messages. |
+| **Chat** | One chat room for the whole server. 500 characters a message, a few messages per ten seconds, history kept 30 days. You can reply to a message (the reply carries a short look at the one it answers) and delete your own messages. |
+| **Profiles** | Each person can share a small summary (plays, liked songs and playlists counts, top five artists and genres) so others can open their profile. Nothing else about the library is sent. Switching sharing off removes it. |
 | **Blocking** | Block someone: you stop seeing their presence, reactions and chat, they stop seeing yours, follows end, and listening along ends. They are not told. |
 | **Listen together** | Join someone who is playing: you get their song and position to start in step, they are told you joined, and you are let go when they stop. |
 
@@ -111,7 +112,8 @@ curl http://127.0.0.1:4540/activity/v1/health              # {"status":"ok","ver
 ```
 
 The unit runs it as a private, throw-away user with its own data folder (`/var/lib/soundera-activity`) and with most
-of the system closed off. Logs: `journalctl -u soundera-activity -f`.
+of the system closed off. Logs: `journalctl -u soundera-activity -f`. The first line of every run says which version it is, for example
+`SoundEra Activity 0.3.0 (linux x86_64) starting`, and `soundera-activity --version` and `GET /activity/v1/health` say it too.
 
 ## Put HTTPS in front of it
 
@@ -182,7 +184,7 @@ What the service **sees and keeps**:
 |---|---|
 | Sees, never keeps | Your Navidrome token and salt, once, at sign-in. |
 | Keeps in memory only | What each person plays now (forgotten after 90 seconds without an update, and on restart), who listens along with whom. |
-| Keeps on disk | User names (from Navidrome), who follows or blocked whom, chat messages (30 days), reactions (as received). |
+| Keeps on disk | User names (from Navidrome), who follows or blocked whom, chat messages and replies (30 days), reactions (as received), each person's profile summary (numbers and the top five artist and genre names). |
 | Never has | Passwords, your music library, file names, IP addresses in the database. |
 
 How it protects you:
@@ -190,6 +192,7 @@ How it protects you:
 - **No passwords, ever.** Logins are replayed to your own Navidrome and forgotten. Sessions are signed tokens
   (HMAC-SHA256) that expire after 12 hours. The signing key is created on first start in the data folder (owner-only)
   and is not part of this source code.
+- **Profile summaries** are limited (five entries, short names, no control characters) and removed when sharing is switched off.
 - **Rate limits** on wrong logins (per address and per user) and on chat; length limits and control-character checks on
   every text; request bodies are capped at 16 KB; the WebSocket accepts nothing from clients.
 - **Opt-out and blocking** are immediate and two-way, and a blocked person is not told.
@@ -271,7 +274,8 @@ are `{"error": "..."}` with a fitting status code.
 | `PUT /presence`, `DELETE /presence`, `GET /presence` | Send what you play (every 15 s; an entry expires after 90 s), end it, read everyone else's. |
 | `GET /follows`, `PUT/DELETE /follows/{user}`, `GET /feed` | Who you follow and who follows you; follow or stop; what the people you follow play now. |
 | `POST /reactions` `{to, song_id, kind}`, `GET /reactions` | `kind` is `like`, `fire`, `sad` or `laugh`. The person must be playing `song_id` now (409 otherwise). The inbox lists the last 7 days. |
-| `GET /chat?after=ID&limit=N`, `POST /chat` `{body}`, `DELETE /chat/{id}` | The room. Only the writer can delete (404 otherwise). |
+| `GET /chat?after=ID&limit=N`, `POST /chat` `{body, reply_to?}`, `DELETE /chat/{id}` | The room. `reply_to` is the id of the message answered (400 if it is gone); a reply carries `reply: {id, from, body}` with the first 120 characters (`from` and `body` are `null` once the original was deleted). Only the writer can delete (404 otherwise). |
+| `PUT /profile` `{plays, liked, playlists, top_artists[], top_genres[]}`, `GET /profile/{user}` | Share your own summary (at most five `{name, plays}` entries each; 403 while sharing is off) and read someone else's: `{user, summary, updated_at_ms, followers, following, you_follow, playing_now}`. 404 when they share nothing, or when either of you blocked the other. |
 | `PUT/DELETE /blocks/{user}`, `GET /blocks` | Block, unblock, list. |
 | `PUT /listen/{host}`, `DELETE /listen`, `GET /listen` | Listen along with someone playing now (returns their presence); leave; who you follow along and who follows along with you. |
 | `GET /ws?session=TOKEN` | WebSocket with live events (below). |
@@ -289,7 +293,7 @@ curl -s $A/presence -H "authorization: Bearer $SESSION"
 
 **WebSocket events** (JSON, one per message; you never get an echo of your own actions): `presence`
 `{entry}` · `presence_ended` `{user}` · `reaction` `{from,to,song_id,kind}` (only to the person it is for) · `chat`
-`{message}` · `chat_deleted` `{id}` · `listener_joined` / `listener_left` `{host,listener}` (to the host) · `listen_ended`
+`{message}` (with its `reply`) · `chat_deleted` `{id}` · `listener_joined` / `listener_left` `{host,listener}` (to the host) · `listen_ended`
 `{host,listeners}` (to the people listening along). Blocked people's events are never delivered.
 
 ## Developing

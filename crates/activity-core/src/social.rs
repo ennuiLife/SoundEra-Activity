@@ -39,12 +39,60 @@ impl ReactionKind {
     }
 }
 
+/// The message a chat message replies to: a short look at it. `from` and `body` are `None` when it was deleted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyRef {
+    pub id: i64,
+    pub from: Option<String>,
+    pub body: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub id: i64,
     pub from: String,
     pub body: String,
     pub created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<ReplyRef>,
+}
+
+/// How much of the replied-to message is shown (in characters).
+pub const REPLY_PREVIEW_CHARS: usize = 120;
+
+/// One name with a count, for the "most played" lists of a profile.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ranked {
+    pub name: String,
+    pub plays: u32,
+}
+
+/// What a person chooses to show on their profile (sent by their SoundEra while they share their activity). The
+/// service never sees the library itself, only these few numbers and names.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileSummary {
+    pub plays: u32,
+    pub liked: u32,
+    pub playlists: u32,
+    #[serde(default)]
+    pub top_artists: Vec<Ranked>,
+    #[serde(default)]
+    pub top_genres: Vec<Ranked>,
+}
+
+impl ProfileSummary {
+    /// Refuse what is too long or makes no sense (this comes from other people's computers).
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.top_artists.len() > 5 || self.top_genres.len() > 5 {
+            return Err("too many entries");
+        }
+        for r in self.top_artists.iter().chain(self.top_genres.iter()) {
+            if r.name.is_empty() || r.name.chars().count() > 120 || r.name.chars().any(|c| c.is_control()) {
+                return Err("a name is not allowed");
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A chat text is trimmed and must be 1 to `MAX_CHAT_CHARS` characters with no control characters other than
@@ -101,6 +149,20 @@ mod tests {
         assert!(clean_chat_body("tab\there").is_err());
         assert!(clean_chat_body(&"a\n".repeat(20)).is_err());
         assert_eq!(clean_chat_body("héllo א 你好").unwrap(), "héllo א 你好");
+    }
+
+    #[test]
+    fn a_profile_summary_is_limited() {
+        let ok = ProfileSummary { plays: 10, liked: 2, playlists: 1, top_artists: vec![Ranked { name: "Fictional Band".into(), plays: 5 }], top_genres: vec![] };
+        assert!(ok.validate().is_ok());
+        let mut many = ok.clone();
+        many.top_artists = (0..6).map(|i| Ranked { name: format!("a{i}"), plays: 1 }).collect();
+        assert!(many.validate().is_err());
+        let mut bad = ok.clone();
+        bad.top_genres = vec![Ranked { name: "x\ny".into(), plays: 1 }];
+        assert!(bad.validate().is_err());
+        bad.top_genres = vec![Ranked { name: "".into(), plays: 1 }];
+        assert!(bad.validate().is_err());
     }
 
     #[test]

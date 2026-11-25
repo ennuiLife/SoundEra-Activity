@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "activity-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "hmac",
@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "activity-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "activity-core",
  "axum",

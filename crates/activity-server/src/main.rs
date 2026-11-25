@@ -87,6 +87,7 @@ async fn main() {
         None => {}
     }
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
+    tracing::info!("SoundEra Activity {} ({} {}) starting", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
     let config = match Config::from_env() {
         Ok(c) => c,
         Err(e) => {
@@ -103,6 +104,7 @@ async fn main() {
     let conn = db::open(&config.data_dir.join("activity.db")).expect("database");
     let _ = std::fs::set_permissions(config.data_dir.join("activity.db"), std::fs::Permissions::from_mode(0o600));
     let bind = config.bind.clone();
+    let config_dir = config.data_dir.clone();
     let app = router(AppState::new(config, key, conn));
     let listener = tokio::net::TcpListener::bind(&bind).await.expect("bind");
     if std::env::var("UPDATE_CHECK").map(|v| v.eq_ignore_ascii_case("off")).unwrap_or(false) {
@@ -124,7 +126,7 @@ async fn main() {
             }
         });
     }
-    tracing::info!("listening on {bind}");
+    tracing::info!("SoundEra Activity {} is listening on {bind}, data in {}", env!("CARGO_PKG_VERSION"), config_dir.display());
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; })
         .await

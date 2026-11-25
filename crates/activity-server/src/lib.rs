@@ -113,6 +113,8 @@ pub fn router(state: AppState) -> Router {
         .route("/activity/v1/reactions", get(list_reactions).post(post_reaction))
         .route("/activity/v1/chat", get(list_chat).post(post_chat))
         .route("/activity/v1/chat/{id}", axum::routing::delete(delete_chat))
+        .route("/activity/v1/profile", put(put_profile))
+        .route("/activity/v1/profile/{user}", get(get_profile))
         .route("/activity/v1/blocks", get(list_blocks))
         .route("/activity/v1/blocks/{user}", put(block_user).delete(unblock_user))
         .route("/activity/v1/listen", get(listen_state).delete(listen_leave))
@@ -223,6 +225,7 @@ async fn set_settings(State(state): State<AppState>, headers: HeaderMap, Json(s)
     }
     if !s.share_presence {
         end_presence(&state, &user);
+        let _ = db::delete_profile(&state.db.lock().unwrap(), &user);
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -428,6 +431,9 @@ async fn list_reactions(State(state): State<AppState>, headers: HeaderMap) -> Ap
 #[derive(Deserialize)]
 struct ChatRequest {
     body: String,
+    /// The id of the message this one replies to.
+    #[serde(default)]
+    reply_to: Option<i64>,
 }
 
 async fn post_chat(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<ChatRequest>) -> ApiResult<Json<activity_core::ChatMessage>> {
@@ -440,14 +446,70 @@ async fn post_chat(State(state): State<AppState>, headers: HeaderMap, Json(req):
             return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "slow down a little"));
         }
     }
-    let id = {
+    let (id, reply) = {
         let conn = state.db.lock().unwrap();
         db::touch_user(&conn, &user, now / 1000).map_err(internal)?;
-        db::add_message(&conn, &user, &body, now, activity_core::social::CHAT_KEEP_MS).map_err(internal)?
+        if let Some(target) = req.reply_to {
+            if !db::message_exists(&conn, target).map_err(internal)? {
+                return Err(ApiError(StatusCode::BAD_REQUEST, "that message is gone"));
+            }
+        }
+        let id = db::add_message(&conn, &user, &body, req.reply_to, now, activity_core::social::CHAT_KEEP_MS).map_err(internal)?;
+        let reply = match req.reply_to {
+            Some(target) => Some(db::reply_ref(&conn, target).map_err(internal)?),
+            None => None,
+        };
+        (id, reply)
     };
-    let message = activity_core::ChatMessage { id, from: user, body, created_at_ms: now };
+    let message = activity_core::ChatMessage { id, from: user, body, created_at_ms: now, reply };
     let _ = state.events.send(Event::Chat { message: message.clone() });
     Ok(Json(message))
+}
+
+/// Send your own profile summary (plays, liked songs, playlists, top artists and genres) so other people can see it.
+/// Only while sharing is on; switching sharing off removes it.
+async fn put_profile(State(state): State<AppState>, headers: HeaderMap, Json(summary): Json<activity_core::ProfileSummary>) -> ApiResult<StatusCode> {
+    let user = authed(&state, &headers)?;
+    summary.validate().map_err(|m| ApiError(StatusCode::BAD_REQUEST, m))?;
+    let conn = state.db.lock().unwrap();
+    if !db::share_presence(&conn, &user).map_err(internal)? {
+        return Err(ApiError(StatusCode::FORBIDDEN, "sharing is switched off"));
+    }
+    let json = serde_json::to_string(&summary).map_err(internal)?;
+    db::put_profile(&conn, &user, &json, now_ms()).map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct ProfileOut {
+    user: String,
+    summary: activity_core::ProfileSummary,
+    updated_at_ms: u64,
+    followers: usize,
+    following: usize,
+    you_follow: bool,
+    playing_now: bool,
+}
+
+/// Someone else's profile. Hidden (404) when they share nothing, or when either of you blocked the other.
+async fn get_profile(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(target): axum::extract::Path<String>) -> ApiResult<Json<ProfileOut>> {
+    let user = authed(&state, &headers)?;
+    let not_found = ApiError(StatusCode::NOT_FOUND, "no profile to show");
+    let (summary, updated_at_ms, followers, following, you_follow) = {
+        let conn = state.db.lock().unwrap();
+        if target != user
+            && (db::is_blocked(&conn, &user, &target).map_err(internal)? || db::is_blocked(&conn, &target, &user).map_err(internal)? || !db::share_presence(&conn, &target).map_err(internal)?)
+        {
+            return Err(not_found);
+        }
+        let Some((json, at)) = db::get_profile(&conn, &target).map_err(internal)? else { return Err(not_found) };
+        let summary: activity_core::ProfileSummary = serde_json::from_str(&json).map_err(internal)?;
+        let followers = db::followers(&conn, &target).map_err(internal)?;
+        let following = db::following(&conn, &target).map_err(internal)?;
+        (summary, at, followers.len(), following.len(), followers.contains(&user))
+    };
+    let playing_now = state.board.lock().unwrap().visible_to(&user, now_ms()).iter().any(|e| e.user == target);
+    Ok(Json(ProfileOut { user: target, summary, updated_at_ms, followers, following, you_follow, playing_now }))
 }
 
 #[derive(Deserialize)]

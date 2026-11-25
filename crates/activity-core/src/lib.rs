@@ -6,4 +6,4 @@ pub mod social;
 
 pub use presence::{PlayState, PresenceBoard, PresenceUpdate, PRESENCE_TTL_MS};
 pub use session::SessionKey;
-pub use social::{ChatMessage, ReactionKind};
+pub use social::{ChatMessage, ProfileSummary, ReactionKind, Ranked, ReplyRef};
