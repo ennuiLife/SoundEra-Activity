@@ -25,6 +25,26 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             followee TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             PRIMARY KEY (follower, followee)
+        );
+        CREATE TABLE IF NOT EXISTS reactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_user TEXT NOT NULL,
+            to_user TEXT NOT NULL,
+            song_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE (from_user, to_user, song_id, kind)
+        );
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_user TEXT NOT NULL,
+            body TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS blocks (
+            blocker TEXT NOT NULL,
+            blocked TEXT NOT NULL,
+            PRIMARY KEY (blocker, blocked)
         );",
     )
 }
@@ -76,4 +96,82 @@ pub fn user_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
         rusqlite::Error::QueryReturnedNoRows => Ok(false),
         e => Err(e),
     })
+}
+
+// ---- blocks ----
+
+pub fn block(conn: &Connection, blocker: &str, blocked: &str) -> rusqlite::Result<()> {
+    conn.execute("INSERT OR IGNORE INTO blocks (blocker, blocked) VALUES (?1, ?2)", params![blocker, blocked])?;
+    Ok(())
+}
+
+pub fn unblock(conn: &Connection, blocker: &str, blocked: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM blocks WHERE blocker = ?1 AND blocked = ?2", params![blocker, blocked])?;
+    Ok(())
+}
+
+pub fn blocked_by(conn: &Connection, blocker: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT blocked FROM blocks WHERE blocker = ?1 ORDER BY blocked")?;
+    let rows = stmt.query_map(params![blocker], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// Has `blocker` blocked `blocked`?
+pub fn is_blocked(conn: &Connection, blocker: &str, blocked: &str) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT 1 FROM blocks WHERE blocker = ?1 AND blocked = ?2", params![blocker, blocked], |_| Ok(())).map(|_| true).or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(false),
+        e => Err(e),
+    })
+}
+
+// ---- reactions ----
+
+/// Record a reaction; the same person reacting the same way to the same song again changes nothing.
+/// Returns whether it was new.
+pub fn add_reaction(conn: &Connection, from: &str, to: &str, song_id: &str, kind: &str, now_ms: u64) -> rusqlite::Result<bool> {
+    Ok(conn.execute("INSERT OR IGNORE INTO reactions (from_user, to_user, song_id, kind, created_at) VALUES (?1, ?2, ?3, ?4, ?5)", params![from, to, song_id, kind, now_ms as i64])? > 0)
+}
+
+pub struct ReactionRow {
+    pub from: String,
+    pub song_id: String,
+    pub kind: String,
+    pub created_at_ms: u64,
+}
+
+/// Reactions `user` received since `since_ms`, newest first, from people they have not blocked.
+pub fn reactions_for(conn: &Connection, user: &str, since_ms: u64, limit: u32) -> rusqlite::Result<Vec<ReactionRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT from_user, song_id, kind, created_at FROM reactions
+         WHERE to_user = ?1 AND created_at >= ?2 AND from_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?1)
+         ORDER BY id DESC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![user, since_ms as i64, limit], |r| Ok(ReactionRow { from: r.get(0)?, song_id: r.get(1)?, kind: r.get(2)?, created_at_ms: r.get::<_, i64>(3)? as u64 }))?;
+    rows.collect()
+}
+
+// ---- chat ----
+
+pub fn add_message(conn: &Connection, from: &str, body: &str, now_ms: u64, keep_ms: u64) -> rusqlite::Result<i64> {
+    conn.execute("DELETE FROM messages WHERE created_at < ?1", params![now_ms.saturating_sub(keep_ms) as i64])?;
+    conn.execute("INSERT INTO messages (from_user, body, created_at) VALUES (?1, ?2, ?3)", params![from, body, now_ms as i64])?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// The newest `limit` messages after id `after`, oldest first, leaving out people `viewer` has blocked.
+pub fn messages_for(conn: &Connection, viewer: &str, after: i64, limit: u32) -> rusqlite::Result<Vec<activity_core::ChatMessage>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, from_user, body, created_at FROM (
+            SELECT id, from_user, body, created_at FROM messages
+            WHERE id > ?2 AND from_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?1)
+            ORDER BY id DESC LIMIT ?3
+         ) ORDER BY id",
+    )?;
+    let rows = stmt.query_map(params![viewer, after, limit], |r| Ok(activity_core::ChatMessage { id: r.get(0)?, from: r.get(1)?, body: r.get(2)?, created_at_ms: r.get::<_, i64>(3)? as u64 }))?;
+    rows.collect()
+}
+
+/// Delete a message, but only if `user` wrote it. Returns whether one was deleted.
+pub fn delete_own_message(conn: &Connection, user: &str, id: i64) -> rusqlite::Result<bool> {
+    Ok(conn.execute("DELETE FROM messages WHERE id = ?1 AND from_user = ?2", params![id, user])? > 0)
 }

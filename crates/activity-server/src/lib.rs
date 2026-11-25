@@ -37,13 +37,24 @@ pub fn now_ms() -> u64 {
 pub enum Event {
     Presence { entry: activity_core::presence::PresenceEntry },
     PresenceEnded { user: String },
+    Reaction { from: String, to: String, song_id: String, kind: activity_core::ReactionKind },
+    Chat { message: activity_core::ChatMessage },
+    ChatDeleted { id: i64 },
 }
 
 impl Event {
-    fn user(&self) -> &str {
+    /// Should `viewer` get this event? Nobody gets an echo of their own action, a reaction goes only to the person
+    /// it is for, and nothing from someone the viewer has blocked is delivered.
+    fn is_for(&self, viewer: &str, db: &rusqlite::Connection) -> bool {
+        let blocked = |who: &str| db::is_blocked(db, viewer, who).unwrap_or(false);
+        // Presence is hidden both ways between two people when either has blocked the other.
+        let either = |who: &str| blocked(who) || db::is_blocked(db, who, viewer).unwrap_or(false);
         match self {
-            Event::Presence { entry } => &entry.user,
-            Event::PresenceEnded { user } => user,
+            Event::Presence { entry } => entry.user != viewer && !either(&entry.user),
+            Event::PresenceEnded { user } => user != viewer && !either(user),
+            Event::Reaction { from, to, .. } => to == viewer && !blocked(from),
+            Event::Chat { message } => message.from != viewer && !blocked(&message.from),
+            Event::ChatDeleted { .. } => true,
         }
     }
 }
@@ -57,12 +68,13 @@ pub struct AppState {
     events: broadcast::Sender<Event>,
     http: reqwest::Client,
     fails: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
+    chat_times: Arc<Mutex<HashMap<String, Vec<u64>>>>,
 }
 
 impl AppState {
     pub fn new(config: Config, key: SessionKey, db: rusqlite::Connection) -> AppState {
         let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none()).build().expect("http client");
-        AppState { config: Arc::new(config), key, db: Arc::new(Mutex::new(db)), board: Arc::default(), events: broadcast::channel(256).0, http, fails: Arc::default() }
+        AppState { config: Arc::new(config), key, db: Arc::new(Mutex::new(db)), board: Arc::default(), events: broadcast::channel(256).0, http, fails: Arc::default(), chat_times: Arc::default() }
     }
 
     fn too_many_fails(&self, who: &str) -> bool {
@@ -87,6 +99,11 @@ pub fn router(state: AppState) -> Router {
         .route("/activity/v1/follows", get(list_follows))
         .route("/activity/v1/follows/{user}", put(follow_user).delete(unfollow_user))
         .route("/activity/v1/feed", get(feed))
+        .route("/activity/v1/reactions", get(list_reactions).post(post_reaction))
+        .route("/activity/v1/chat", get(list_chat).post(post_chat))
+        .route("/activity/v1/chat/{id}", axum::routing::delete(delete_chat))
+        .route("/activity/v1/blocks", get(list_blocks))
+        .route("/activity/v1/blocks/{user}", put(block_user).delete(unblock_user))
         .route("/activity/v1/ws", get(ws))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(state)
@@ -219,9 +236,17 @@ async fn delete_presence(State(state): State<AppState>, headers: HeaderMap) -> A
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Leave out people who have blocked `viewer`, or whom `viewer` has blocked.
+fn hide_blocked(state: &AppState, viewer: &str, entries: &mut Vec<activity_core::presence::PresenceEntry>) {
+    let conn = state.db.lock().unwrap();
+    entries.retain(|e| !db::is_blocked(&conn, viewer, &e.user).unwrap_or(false) && !db::is_blocked(&conn, &e.user, viewer).unwrap_or(false));
+}
+
 async fn list_presence(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Vec<activity_core::presence::PresenceEntry>>> {
     let user = authed(&state, &headers)?;
-    Ok(Json(state.board.lock().unwrap().visible_to(&user, now_ms())))
+    let mut all = state.board.lock().unwrap().visible_to(&user, now_ms());
+    hide_blocked(&state, &user, &mut all);
+    Ok(Json(all))
 }
 
 #[derive(Serialize)]
@@ -261,7 +286,129 @@ async fn feed(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Js
     let following = db::following(&state.db.lock().unwrap(), &user).map_err(internal)?;
     let mut all = state.board.lock().unwrap().visible_to(&user, now_ms());
     all.retain(|e| following.contains(&e.user));
+    hide_blocked(&state, &user, &mut all);
     Ok(Json(all))
+}
+
+#[derive(Deserialize)]
+struct ReactionRequest {
+    to: String,
+    song_id: String,
+    kind: String,
+}
+
+/// React to what someone is playing right now. The person must be playing that very song (so reactions cannot be
+/// aimed at nothing), cannot be yourself, and must not have blocked you.
+async fn post_reaction(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<ReactionRequest>) -> ApiResult<StatusCode> {
+    let user = authed(&state, &headers)?;
+    let kind = activity_core::ReactionKind::parse(&req.kind).ok_or(ApiError(StatusCode::BAD_REQUEST, "unknown reaction"))?;
+    if req.to == user {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "you cannot react to yourself"));
+    }
+    let playing_it = state.board.lock().unwrap().visible_to(&user, now_ms()).iter().any(|e| e.user == req.to && e.presence.song_id == req.song_id);
+    if !playing_it {
+        return Err(ApiError(StatusCode::CONFLICT, "that person is not playing that song now"));
+    }
+    let now = now_ms();
+    let is_new = {
+        let conn = state.db.lock().unwrap();
+        if db::is_blocked(&conn, &req.to, &user).map_err(internal)? {
+            // Do not tell the sender they are blocked: the reaction simply goes nowhere.
+            return Ok(StatusCode::NO_CONTENT);
+        }
+        db::add_reaction(&conn, &user, &req.to, &req.song_id, kind.as_str(), now).map_err(internal)?
+    };
+    if is_new {
+        let _ = state.events.send(Event::Reaction { from: user, to: req.to, song_id: req.song_id, kind });
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct ReactionOut {
+    from: String,
+    song_id: String,
+    kind: String,
+    created_at_ms: u64,
+}
+
+/// Reactions you received in the last 7 days, newest first (for a client that was offline).
+async fn list_reactions(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Vec<ReactionOut>>> {
+    let user = authed(&state, &headers)?;
+    let since = now_ms().saturating_sub(7 * 24 * 3600 * 1000);
+    let rows = db::reactions_for(&state.db.lock().unwrap(), &user, since, 50).map_err(internal)?;
+    Ok(Json(rows.into_iter().map(|r| ReactionOut { from: r.from, song_id: r.song_id, kind: r.kind, created_at_ms: r.created_at_ms }).collect()))
+}
+
+#[derive(Deserialize)]
+struct ChatRequest {
+    body: String,
+}
+
+async fn post_chat(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<ChatRequest>) -> ApiResult<Json<activity_core::ChatMessage>> {
+    let user = authed(&state, &headers)?;
+    let body = activity_core::social::clean_chat_body(&req.body).map_err(|m| ApiError(StatusCode::BAD_REQUEST, m))?;
+    let now = now_ms();
+    {
+        let mut times = state.chat_times.lock().unwrap();
+        if !activity_core::social::chat_allowed(times.entry(user.clone()).or_default(), now) {
+            return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "slow down a little"));
+        }
+    }
+    let id = {
+        let conn = state.db.lock().unwrap();
+        db::touch_user(&conn, &user, now / 1000).map_err(internal)?;
+        db::add_message(&conn, &user, &body, now, activity_core::social::CHAT_KEEP_MS).map_err(internal)?
+    };
+    let message = activity_core::ChatMessage { id, from: user, body, created_at_ms: now };
+    let _ = state.events.send(Event::Chat { message: message.clone() });
+    Ok(Json(message))
+}
+
+#[derive(Deserialize)]
+struct ChatQuery {
+    #[serde(default)]
+    after: i64,
+    limit: Option<u32>,
+}
+
+async fn list_chat(State(state): State<AppState>, headers: HeaderMap, Query(q): Query<ChatQuery>) -> ApiResult<Json<Vec<activity_core::ChatMessage>>> {
+    let user = authed(&state, &headers)?;
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    Ok(Json(db::messages_for(&state.db.lock().unwrap(), &user, q.after, limit).map_err(internal)?))
+}
+
+async fn delete_chat(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<i64>) -> ApiResult<StatusCode> {
+    let user = authed(&state, &headers)?;
+    if !db::delete_own_message(&state.db.lock().unwrap(), &user, id).map_err(internal)? {
+        return Err(ApiError(StatusCode::NOT_FOUND, "no such message of yours"));
+    }
+    let _ = state.events.send(Event::ChatDeleted { id });
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_blocks(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Vec<String>>> {
+    let user = authed(&state, &headers)?;
+    Ok(Json(db::blocked_by(&state.db.lock().unwrap(), &user).map_err(internal)?))
+}
+
+async fn block_user(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(target): axum::extract::Path<String>) -> ApiResult<StatusCode> {
+    let user = authed(&state, &headers)?;
+    if target == user {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "you cannot block yourself"));
+    }
+    let conn = state.db.lock().unwrap();
+    db::block(&conn, &user, &target).map_err(internal)?;
+    // Blocking also ends following in both directions.
+    let _ = db::unfollow(&conn, &user, &target);
+    let _ = db::unfollow(&conn, &target, &user);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unblock_user(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(target): axum::extract::Path<String>) -> ApiResult<StatusCode> {
+    let user = authed(&state, &headers)?;
+    db::unblock(&state.db.lock().unwrap(), &user, &target).map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -279,11 +426,13 @@ async fn ws_loop(state: AppState, user: String, mut socket: WebSocket) {
     loop {
         tokio::select! {
             event = events.recv() => match event {
-                Ok(event) if event.user() != user => {
+                Ok(event) => {
+                    let wanted = event.is_for(&user, &state.db.lock().unwrap());
+                    if !wanted { continue }
                     let Ok(text) = serde_json::to_string(&event) else { continue };
                     if socket.send(Message::Text(text.into())).await.is_err() { break }
                 }
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(_) => break,
             },
             incoming = socket.recv() => match incoming {

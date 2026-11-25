@@ -3,7 +3,7 @@
 A small service that runs next to a Navidrome (OpenSubsonic) server and adds what Navidrome cannot carry:
 live presence now, and later follows, reactions, chat and listen-together. See [PLAN.md](PLAN.md).
 
-Status: milestone 1 (login and presence). Private, unpublished.
+Status: login, presence, follows, reactions, chat and blocking. Private, unpublished.
 
 ## Run
 
@@ -22,6 +22,13 @@ Put it behind HTTPS (a reverse proxy) when it is reachable from outside. Plain h
 | `GET /activity/v1/me`, `PUT /activity/v1/me/settings` `{share_presence}` | Your state; switching sharing off removes your presence at once. |
 | `PUT /activity/v1/presence`, `DELETE ...`, `GET ...` | Send what you play (every 15 s; entries expire after 90 s), end it, read everyone else's. |
 | `GET /activity/v1/ws?session=...` | Live events: `presence` and `presence_ended` from other people. |
+
+| `PUT/DELETE /activity/v1/follows/{user}`, `GET .../follows`, `GET .../feed` | Follow people; the feed is what the people you follow play now. |
+| `POST /activity/v1/reactions` `{to, song_id, kind}`, `GET .../reactions` | React (`like`, `fire`, `sad`, `laugh`) to what someone plays right now; the same reaction twice counts once. The inbox holds the last 7 days. |
+| `POST /activity/v1/chat` `{body}`, `GET .../chat?after=ID&limit=N`, `DELETE .../chat/{id}` | The one server-wide room: 500 characters, 5 messages per 10 s, history kept 30 days, only the writer can delete. |
+| `PUT/DELETE /activity/v1/blocks/{user}`, `GET .../blocks` | Block someone: their chat, reactions and presence are hidden both ways, and follows between you end. A blocked person is not told. |
+
+Live events on the WebSocket now also include `reaction` (only to the person it is for), `chat` and `chat_deleted`.
 
 Send the session as `Authorization: Bearer ...`.
 

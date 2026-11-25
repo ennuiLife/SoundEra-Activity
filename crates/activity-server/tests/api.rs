@@ -203,3 +203,131 @@ async fn follows_make_a_feed_of_the_people_you_follow() {
     assert!(feed(a.clone()).await.is_empty());
     assert_eq!(s.presence(&a).await.len(), 1);
 }
+
+async fn next_event(socket: &mut (impl futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>> + Unpin)) -> Value {
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+    serde_json::from_str(msg.to_text().unwrap()).unwrap()
+}
+
+async fn nothing_more(socket: &mut (impl futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>> + Unpin)) {
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(300), socket.next()).await.is_err(), "an event arrived that should not have");
+}
+
+impl Service {
+    async fn react(&self, session: &str, to: &str, song_id: &str, kind: &str) -> reqwest::Response {
+        self.http.post(format!("{}/reactions", self.base)).bearer_auth(session).json(&json!({"to": to, "song_id": song_id, "kind": kind})).send().await.unwrap()
+    }
+    async fn chat(&self, session: &str, body: &str) -> reqwest::Response {
+        self.http.post(format!("{}/chat", self.base)).bearer_auth(session).json(&json!({"body": body})).send().await.unwrap()
+    }
+    async fn messages(&self, session: &str) -> Vec<Value> {
+        self.http.get(format!("{}/chat", self.base)).bearer_auth(session).send().await.unwrap().json().await.unwrap()
+    }
+}
+
+#[tokio::test]
+async fn a_reaction_reaches_only_the_person_playing_the_song() {
+    let s = start().await;
+    let (a, b) = (s.login("alice").await, s.login("bob").await);
+    let url = |session: &str| s.base.replace("http://", "ws://") + &format!("/ws?session={session}");
+    let (mut ws_b, _) = tokio_tungstenite::connect_async(url(&b)).await.unwrap();
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(url(&a)).await.unwrap();
+    s.put_presence(&b, Service::song("Two")).await;
+    assert_eq!(next_event(&mut ws_a).await["type"], "presence");
+    // Not playing it, yourself, unknown kinds: refused.
+    assert_eq!(s.react(&a, "bob", "other-song", "like").await.status(), 409);
+    assert_eq!(s.react(&a, "alice", "s1", "like").await.status(), 400);
+    assert_eq!(s.react(&a, "bob", "s1", "angry").await.status(), 400);
+    assert_eq!(s.react(&a, "nobody", "s1", "like").await.status(), 409);
+    // The real thing: bob gets it live, alice gets no echo, and it is in his inbox.
+    assert_eq!(s.react(&a, "bob", "s1", "fire").await.status(), 204);
+    let v = next_event(&mut ws_b).await;
+    assert_eq!((v["type"].as_str(), v["from"].as_str(), v["kind"].as_str(), v["song_id"].as_str()), (Some("reaction"), Some("alice"), Some("fire"), Some("s1")));
+    nothing_more(&mut ws_a).await;
+    // The same reaction again is accepted but changes nothing (no second event, one inbox row).
+    assert_eq!(s.react(&a, "bob", "s1", "fire").await.status(), 204);
+    nothing_more(&mut ws_b).await;
+    let inbox: Vec<Value> = s.http.get(format!("{}/reactions", s.base)).bearer_auth(&b).send().await.unwrap().json().await.unwrap();
+    assert_eq!(inbox.len(), 1);
+    assert_eq!(inbox[0]["from"], "alice");
+}
+
+#[tokio::test]
+async fn chat_is_posted_listed_limited_and_deleted_only_by_its_writer() {
+    let s = start().await;
+    let (a, b) = (s.login("alice").await, s.login("bob").await);
+    let r = s.chat(&a, "  hello everyone  ").await;
+    assert_eq!(r.status(), 200);
+    let first: Value = r.json().await.unwrap();
+    assert_eq!((first["from"].as_str(), first["body"].as_str()), (Some("alice"), Some("hello everyone")));
+    s.chat(&b, "hi alice").await;
+    let list = s.messages(&b).await;
+    assert_eq!(list.iter().map(|m| m["body"].as_str().unwrap()).collect::<Vec<_>>(), ["hello everyone", "hi alice"]);
+    // After an id, only newer ones.
+    let id = first["id"].as_i64().unwrap();
+    let newer: Vec<Value> = s.http.get(format!("{}/chat?after={id}", s.base)).bearer_auth(&a).send().await.unwrap().json().await.unwrap();
+    assert_eq!(newer.len(), 1);
+    // Bad text.
+    assert_eq!(s.chat(&a, "   ").await.status(), 400);
+    assert_eq!(s.chat(&a, &"x".repeat(501)).await.status(), 400);
+    assert_eq!(s.chat(&a, "bell\u{7}").await.status(), 400);
+    // Only the writer can delete.
+    assert_eq!(s.http.delete(format!("{}/chat/{id}", s.base)).bearer_auth(&b).send().await.unwrap().status(), 404);
+    assert_eq!(s.http.delete(format!("{}/chat/{id}", s.base)).bearer_auth(&a).send().await.unwrap().status(), 204);
+    assert_eq!(s.messages(&b).await.len(), 1);
+}
+
+#[tokio::test]
+async fn chat_is_rate_limited_per_person() {
+    let s = start().await;
+    let (a, b) = (s.login("alice").await, s.login("bob").await);
+    for i in 0..5 {
+        assert_eq!(s.chat(&a, &format!("m{i}")).await.status(), 200);
+    }
+    assert_eq!(s.chat(&a, "one too many").await.status(), 429);
+    assert_eq!(s.chat(&b, "bob is not limited by alice").await.status(), 200);
+}
+
+#[tokio::test]
+async fn chat_goes_live_to_others_but_not_to_the_writer() {
+    let s = start().await;
+    let (a, b) = (s.login("alice").await, s.login("bob").await);
+    let url = |session: &str| s.base.replace("http://", "ws://") + &format!("/ws?session={session}");
+    let (mut ws_a, _) = tokio_tungstenite::connect_async(url(&a)).await.unwrap();
+    let (mut ws_b, _) = tokio_tungstenite::connect_async(url(&b)).await.unwrap();
+    let id = s.chat(&a, "hello").await.json::<Value>().await.unwrap()["id"].as_i64().unwrap();
+    let v = next_event(&mut ws_b).await;
+    assert_eq!((v["type"].as_str(), v["message"]["body"].as_str()), (Some("chat"), Some("hello")));
+    nothing_more(&mut ws_a).await;
+    s.http.delete(format!("{}/chat/{id}", s.base)).bearer_auth(&a).send().await.unwrap();
+    assert_eq!(next_event(&mut ws_b).await, json!({"type": "chat_deleted", "id": id}));
+}
+
+#[tokio::test]
+async fn blocking_hides_chat_reactions_presence_and_follows_both_ways() {
+    let s = start().await;
+    let (a, b) = (s.login("alice").await, s.login("bob").await);
+    s.put_presence(&b, Service::song("Two")).await;
+    s.http.put(format!("{}/follows/bob", s.base)).bearer_auth(&a).send().await.unwrap();
+    s.chat(&b, "annoying message").await;
+    assert_eq!(s.http.put(format!("{}/blocks/alice", s.base)).bearer_auth(&a).send().await.unwrap().status(), 400);
+    assert_eq!(s.http.put(format!("{}/blocks/bob", s.base)).bearer_auth(&a).send().await.unwrap().status(), 204);
+    let blocks: Vec<String> = s.http.get(format!("{}/blocks", s.base)).bearer_auth(&a).send().await.unwrap().json().await.unwrap();
+    assert_eq!(blocks, ["bob"]);
+    // Alice no longer sees Bob's chat, presence or feed entry, and Bob no longer sees Alice's presence either way.
+    assert!(s.messages(&a).await.is_empty());
+    assert_eq!(s.messages(&b).await.len(), 1, "bob still sees the room");
+    assert!(s.presence(&a).await.is_empty());
+    s.put_presence(&a, Service::song("One")).await;
+    assert!(s.presence(&b).await.is_empty());
+    let f: Value = s.http.get(format!("{}/follows", s.base)).bearer_auth(&a).send().await.unwrap().json().await.unwrap();
+    assert_eq!(f["following"], json!([]));
+    // Bob reacting to Alice goes nowhere (and he is not told).
+    assert_eq!(s.react(&b, "alice", "s1", "like").await.status(), 204);
+    let inbox: Vec<Value> = s.http.get(format!("{}/reactions", s.base)).bearer_auth(&a).send().await.unwrap().json().await.unwrap();
+    assert!(inbox.is_empty(), "the blocked person's reaction is dropped without telling them");
+    // Unblocking brings it all back.
+    s.http.delete(format!("{}/blocks/bob", s.base)).bearer_auth(&a).send().await.unwrap();
+    assert_eq!(s.messages(&a).await.len(), 1);
+    assert_eq!(s.presence(&a).await.len(), 1);
+}
