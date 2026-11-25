@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/activity-core", "crates/activity-server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
