@@ -606,3 +606,17 @@ async fn a_song_suggestion_is_a_whisper_that_carries_the_song() {
     assert_eq!((got[0]["song_id"].as_str(), got[0]["to"].as_str()), (Some("s1"), Some("bob")));
     assert!(s.messages(&c).await.is_empty());
 }
+
+#[tokio::test]
+async fn nobody_can_quote_a_whisper_they_cannot_see_or_block_themselves_in_another_case() {
+    let s = start().await;
+    let (a, b, c) = (s.login("alice").await, s.login("bob").await, s.login("cara").await);
+    let post = |from: String, body: Value| {
+        let (http, base) = (s.http.clone(), s.base.clone());
+        async move { http.post(format!("{base}/chat")).bearer_auth(from).json(&body).send().await.unwrap() }
+    };
+    let id = post(a.clone(), json!({"body": "psst", "to": "bob"})).await.json::<Value>().await.unwrap()["id"].as_i64().unwrap();
+    assert_eq!(post(c.clone(), json!({"body": "what?", "reply_to": id})).await.status(), 400, "cara cannot see it");
+    assert_eq!(post(b.clone(), json!({"body": "ok", "reply_to": id})).await.status(), 200, "bob can");
+    assert_eq!(s.http.put(format!("{}/blocks/ALICE", s.base)).bearer_auth(&a).send().await.unwrap().status(), 400);
+}

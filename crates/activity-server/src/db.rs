@@ -197,6 +197,15 @@ pub fn reply_ref(conn: &Connection, id: i64) -> rusqlite::Result<activity_core::
     }
 }
 
+/// Can `viewer` see message `id`? A whisper only its two people can; a missing message counts as not visible.
+pub fn message_visible_to(conn: &Connection, id: i64, viewer: &str) -> rusqlite::Result<bool> {
+    match conn.query_row("SELECT from_user, to_user FROM messages WHERE id = ?1", params![id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))) {
+        Ok((from, to)) => Ok(to.is_none_or(|t| t == viewer || from == viewer)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 pub fn message_exists(conn: &Connection, id: i64) -> rusqlite::Result<bool> {
     conn.query_row("SELECT 1 FROM messages WHERE id = ?1", params![id], |_| Ok(())).map(|_| true).or_else(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => Ok(false),

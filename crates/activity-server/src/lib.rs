@@ -473,7 +473,8 @@ async fn post_chat(State(state): State<AppState>, headers: HeaderMap, Json(req):
         let conn = state.db.lock().unwrap();
         db::touch_user(&conn, &user, now / 1000).map_err(internal)?;
         if let Some(target) = req.reply_to {
-            if !db::message_exists(&conn, target).map_err(internal)? {
+            // A reply to a whisper you cannot see looks the same as a reply to a message that is gone.
+            if !db::message_visible_to(&conn, target, &user).map_err(internal)? {
                 return Err(ApiError(StatusCode::BAD_REQUEST, "that message is gone"));
             }
         }
@@ -481,7 +482,7 @@ async fn post_chat(State(state): State<AppState>, headers: HeaderMap, Json(req):
             return Err(ApiError(StatusCode::BAD_REQUEST, "a suggestion needs a song and a person"));
         }
         if let Some(to) = &req.to {
-            if *to == user {
+            if to.eq_ignore_ascii_case(&user) {
                 return Err(ApiError(StatusCode::BAD_REQUEST, "you cannot whisper to yourself"));
             }
             if req.reply_to.is_some() {
@@ -633,7 +634,7 @@ async fn list_blocks(State(state): State<AppState>, headers: HeaderMap) -> ApiRe
 
 async fn block_user(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(target): axum::extract::Path<String>) -> ApiResult<StatusCode> {
     let user = authed(&state, &headers)?;
-    if target == user {
+    if target.eq_ignore_ascii_case(&user) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "you cannot block yourself"));
     }
     let conn = state.db.lock().unwrap();
