@@ -620,3 +620,28 @@ async fn nobody_can_quote_a_whisper_they_cannot_see_or_block_themselves_in_anoth
     assert_eq!(post(b.clone(), json!({"body": "ok", "reply_to": id})).await.status(), 200, "bob can");
     assert_eq!(s.http.put(format!("{}/blocks/ALICE", s.base)).bearer_auth(&a).send().await.unwrap().status(), 400);
 }
+
+#[tokio::test]
+async fn an_emoji_sticks_to_the_message_and_the_same_call_takes_it_off() {
+    let s = start().await;
+    let (a, b, c) = (s.login("alice").await, s.login("bob").await, s.login("cara").await);
+    let id = s.chat(&a, "hello").await.json::<Value>().await.unwrap()["id"].as_i64().unwrap();
+    let react = |who: String, id: i64, emoji: &str| {
+        let (http, base, emoji) = (s.http.clone(), s.base.clone(), emoji.to_string());
+        async move { http.put(format!("{base}/chat/{id}/reactions")).bearer_auth(who).json(&json!({"emoji": emoji})).send().await.unwrap() }
+    };
+    assert_eq!(react(b.clone(), id, "hi").await.status(), 400, "text is not an emoji");
+    assert_eq!(react(b.clone(), 9999, "🎉").await.status(), 404);
+    assert_eq!(react(b.clone(), id, "🎉").await.status(), 204);
+    assert_eq!(react(c.clone(), id, "🎉").await.status(), 204);
+    assert_eq!(react(c.clone(), id, "🔥").await.status(), 204);
+    let seen = s.messages(&b).await;
+    assert_eq!(seen[0]["reactions"], json!([{"emoji": "🎉", "count": 2, "mine": true}, {"emoji": "🔥", "count": 1, "mine": false}]));
+    // The same emoji again takes it off.
+    assert_eq!(react(b.clone(), id, "🎉").await.status(), 204);
+    assert_eq!(s.messages(&a).await[0]["reactions"], json!([{"emoji": "🎉", "count": 1, "mine": false}, {"emoji": "🔥", "count": 1, "mine": false}]));
+    // A whisper's emoji are for its two people.
+    let w = s.http.post(format!("{}/chat", s.base)).bearer_auth(&a).json(&json!({"body": "psst", "to": "bob"})).send().await.unwrap().json::<Value>().await.unwrap()["id"].as_i64().unwrap();
+    assert_eq!(react(c.clone(), w, "🎉").await.status(), 404);
+    assert_eq!(react(b.clone(), w, "🎉").await.status(), 204);
+}

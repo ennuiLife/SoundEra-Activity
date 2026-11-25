@@ -61,6 +61,25 @@ pub struct ChatMessage {
     /// A song suggested in a whisper (its id; the body says what it is).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub song_id: Option<String>,
+    /// The emoji people attached to this message, each with how many and whether the viewer is one of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<MessageReaction>,
+}
+
+/// One emoji on a chat message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageReaction {
+    pub emoji: String,
+    pub count: u32,
+    pub mine: bool,
+}
+
+/// Most different emoji one message can carry.
+pub const MAX_MESSAGE_EMOJI: usize = 20;
+
+/// Is `emoji` one single emoji (not text)?
+pub fn valid_emoji(emoji: &str) -> bool {
+    valid_reaction(&format!("emoji:{emoji}"))
 }
 
 /// How much of the replied-to message is shown (in characters).

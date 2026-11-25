@@ -46,6 +46,12 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             blocked TEXT NOT NULL,
             PRIMARY KEY (blocker, blocked)
         );
+        CREATE TABLE IF NOT EXISTS message_reactions (
+            message_id INTEGER NOT NULL,
+            user TEXT NOT NULL,
+            emoji TEXT NOT NULL,
+            PRIMARY KEY (message_id, user, emoji)
+        );
         CREATE TABLE IF NOT EXISTS avatars (
             user TEXT PRIMARY KEY,
             png BLOB NOT NULL,
@@ -179,6 +185,7 @@ pub fn reactions_for(conn: &Connection, user: &str, since_ms: u64, limit: u32) -
 #[allow(clippy::too_many_arguments)]
 pub fn add_message(conn: &Connection, from: &str, body: &str, reply_to: Option<i64>, to: Option<&str>, song_id: Option<&str>, now_ms: u64, keep_ms: u64) -> rusqlite::Result<i64> {
     conn.execute("DELETE FROM messages WHERE created_at < ?1", params![now_ms.saturating_sub(keep_ms) as i64])?;
+    conn.execute("DELETE FROM message_reactions WHERE message_id NOT IN (SELECT id FROM messages)", [])?;
     conn.execute("INSERT INTO messages (from_user, body, reply_to, to_user, song_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![from, body, reply_to, to, song_id, now_ms as i64])?;
     Ok(conn.last_insert_rowid())
 }
@@ -224,13 +231,14 @@ pub fn messages_for(conn: &Connection, viewer: &str, after: i64, limit: u32) -> 
          ) ORDER BY id",
     )?;
     let rows: Vec<(activity_core::ChatMessage, Option<i64>)> = stmt
-        .query_map(params![viewer, after, limit], |r| Ok((activity_core::ChatMessage { id: r.get(0)?, from: r.get(1)?, body: r.get(2)?, created_at_ms: r.get::<_, i64>(3)? as u64, reply: None, to: r.get(5)?, song_id: r.get(6)? }, r.get::<_, Option<i64>>(4)?)))?
+        .query_map(params![viewer, after, limit], |r| Ok((activity_core::ChatMessage { id: r.get(0)?, from: r.get(1)?, body: r.get(2)?, created_at_ms: r.get::<_, i64>(3)? as u64, reply: None, to: r.get(5)?, song_id: r.get(6)?, reactions: Vec::new() }, r.get::<_, Option<i64>>(4)?)))?
         .collect::<rusqlite::Result<_>>()?;
     rows.into_iter()
         .map(|(mut m, reply_to)| {
             if let Some(id) = reply_to {
                 m.reply = Some(reply_ref(conn, id)?);
             }
+            m.reactions = message_reactions(conn, m.id, viewer)?;
             Ok(m)
         })
         .collect()
@@ -238,7 +246,37 @@ pub fn messages_for(conn: &Connection, viewer: &str, after: i64, limit: u32) -> 
 
 /// Delete a message, but only if `user` wrote it. Returns whether one was deleted.
 pub fn delete_own_message(conn: &Connection, user: &str, id: i64) -> rusqlite::Result<bool> {
-    Ok(conn.execute("DELETE FROM messages WHERE id = ?1 AND from_user = ?2", params![id, user])? > 0)
+    let gone = conn.execute("DELETE FROM messages WHERE id = ?1 AND from_user = ?2", params![id, user])? > 0;
+    if gone {
+        conn.execute("DELETE FROM message_reactions WHERE message_id = ?1", params![id])?;
+    }
+    Ok(gone)
+}
+
+/// The emoji on message `id` as `viewer` sees them (people the viewer blocked do not count).
+pub fn message_reactions(conn: &Connection, id: i64, viewer: &str) -> rusqlite::Result<Vec<activity_core::social::MessageReaction>> {
+    let mut stmt = conn.prepare(
+        "SELECT emoji, COUNT(*), MAX(user = ?2) FROM message_reactions
+         WHERE message_id = ?1 AND user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?2)
+         GROUP BY emoji ORDER BY MIN(rowid)",
+    )?;
+    let rows = stmt.query_map(params![id, viewer], |r| Ok(activity_core::social::MessageReaction { emoji: r.get(0)?, count: r.get::<_, i64>(1)? as u32, mine: r.get::<_, i64>(2)? != 0 }))?;
+    rows.collect()
+}
+
+/// Put `emoji` on a message, or take it off again when `user` already did. `None` when the message already carries
+/// too many different emoji. Returns whether it is on now.
+pub fn toggle_message_reaction(conn: &Connection, id: i64, user: &str, emoji: &str) -> rusqlite::Result<Option<bool>> {
+    if conn.execute("DELETE FROM message_reactions WHERE message_id = ?1 AND user = ?2 AND emoji = ?3", params![id, user, emoji])? > 0 {
+        return Ok(Some(false));
+    }
+    let kinds: i64 = conn.query_row("SELECT COUNT(DISTINCT emoji) FROM message_reactions WHERE message_id = ?1", params![id], |r| r.get(0))?;
+    let known: bool = conn.prepare("SELECT 1 FROM message_reactions WHERE message_id = ?1 AND emoji = ?2")?.exists(params![id, emoji])?;
+    if !known && kinds as usize >= activity_core::social::MAX_MESSAGE_EMOJI {
+        return Ok(None);
+    }
+    conn.execute("INSERT INTO message_reactions (message_id, user, emoji) VALUES (?1, ?2, ?3)", params![id, user, emoji])?;
+    Ok(Some(true))
 }
 
 // ---- profiles ----

@@ -119,6 +119,7 @@ pub fn router(state: AppState) -> Router {
         .route("/activity/v1/reactions", get(list_reactions).post(post_reaction))
         .route("/activity/v1/chat", get(list_chat).post(post_chat))
         .route("/activity/v1/chat/{id}", axum::routing::delete(delete_chat))
+        .route("/activity/v1/chat/{id}/reactions", put(react_to_message))
         .route("/activity/v1/profile", put(put_profile))
         .route("/activity/v1/profile/{user}", get(get_profile))
         .route("/activity/v1/avatar", put(put_avatar).delete(delete_avatar).layer(DefaultBodyLimit::max(MAX_AVATAR_UPLOAD)))
@@ -502,7 +503,7 @@ async fn post_chat(State(state): State<AppState>, headers: HeaderMap, Json(req):
         };
         (id, reply)
     };
-    let message = activity_core::ChatMessage { id, from: user, body, created_at_ms: now, reply, to: req.to.clone(), song_id: req.song_id.clone() };
+    let message = activity_core::ChatMessage { id, from: user, body, created_at_ms: now, reply, to: req.to.clone(), song_id: req.song_id.clone(), reactions: Vec::new() };
     let _ = state.events.send(Event::Chat { message: message.clone() });
     Ok(Json(message))
 }
@@ -768,4 +769,27 @@ async fn party_kick(State(state): State<AppState>, headers: HeaderMap, axum::ext
     let user = authed(&state, &headers)?;
     let view = state.parties.lock().unwrap().kick(&user, &target).map_err(party_error)?;
     Ok(Json(view))
+}
+
+#[derive(Deserialize)]
+struct MessageReactionRequest {
+    emoji: String,
+}
+
+/// Put an emoji on a chat message you can see, or take yours off again (the same call twice).
+async fn react_to_message(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<i64>, Json(req): Json<MessageReactionRequest>) -> ApiResult<StatusCode> {
+    let user = authed(&state, &headers)?;
+    if !activity_core::social::valid_emoji(&req.emoji) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "that is not one emoji"));
+    }
+    let conn = state.db.lock().unwrap();
+    // A message you cannot see (a whisper for others) looks the same as one that is gone.
+    if !db::message_visible_to(&conn, id, &user).map_err(internal)? {
+        return Err(ApiError(StatusCode::NOT_FOUND, "that message is gone"));
+    }
+    db::touch_user(&conn, &user, now_ms() / 1000).map_err(internal)?;
+    match db::toggle_message_reaction(&conn, id, &user, &req.emoji).map_err(internal)? {
+        Some(_) => Ok(StatusCode::NO_CONTENT),
+        None => Err(ApiError(StatusCode::CONFLICT, "that message has enough different emoji")),
+    }
 }
