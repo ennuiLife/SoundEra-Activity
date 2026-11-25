@@ -58,7 +58,7 @@ Each [release](https://github.com/ennuiLife/SoundEra-Activity/releases) has a st
 any distribution) and a `SHA256SUMS` file.
 
 ```bash
-VERSION=v0.2.0   # use the newest version on the Releases page
+VERSION=v0.1.0   # use the newest version on the Releases page
 curl -LO https://github.com/ennuiLife/SoundEra-Activity/releases/download/$VERSION/soundera-activity-$VERSION-linux-x86_64.tar.gz
 curl -LO https://github.com/ennuiLife/SoundEra-Activity/releases/download/$VERSION/SHA256SUMS
 sha256sum -c SHA256SUMS            # must say: OK
