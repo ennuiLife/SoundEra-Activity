@@ -20,3 +20,4 @@ Activity is maintained by one person, so replies are targets, not guarantees: we
 ## Out of scope
 
 Problems in your music server itself, or attacks that need full control of the machine the service runs on.
+- Every release file is signed with a minisign key whose public half is published in the README and built into the program; `deploy/update.sh` refuses anything whose signature does not match the exact version and file.

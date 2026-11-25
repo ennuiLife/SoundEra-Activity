@@ -17,6 +17,14 @@ jobs:
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: The tag must match the version in Cargo.toml
+        run: |
+          set -euo pipefail
+          want="${GITHUB_REF_NAME#v}"
+          have="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import sys,json; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          [ "$want" = "$have" ] || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $have"; exit 1; }
+      - name: Install the signing tool
+        run: cargo install rsign2 --locked --version 0.6.7
       - run: cargo test --workspace --locked
       - run: cargo build --release --locked -p activity-server --target x86_64-unknown-linux-musl
       - name: Package
@@ -28,10 +36,21 @@ jobs:
           cp -r deploy "$name/deploy"
           tar -czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > SHA256SUMS
+      - name: Sign
+        env:
+          ACTIVITY_SIGNING_KEY: ${{ secrets.ACTIVITY_SIGNING_KEY }}
+        run: |
+          # The key file is readable by this user only, and removed however the step ends.
+          umask 077
+          trap 'rm -f "$RUNNER_TEMP/key"' EXIT
+          printf '%s\n' "$ACTIVITY_SIGNING_KEY" > "$RUNNER_TEMP/key"
+          for f in soundera-activity-*.tar.gz SHA256SUMS; do
+            rsign sign -W -s "$RUNNER_TEMP/key" -x "$f.minisig" -t "version:$GITHUB_REF_NAME file:$f" "$f"
+          done
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" --title "SoundEra Activity $GITHUB_REF_NAME" --generate-notes soundera-activity-*.tar.gz SHA256SUMS
+        run: gh release create "$GITHUB_REF_NAME" --title "SoundEra Activity $GITHUB_REF_NAME" --generate-notes soundera-activity-*.tar.gz soundera-activity-*.tar.gz.minisig SHA256SUMS SHA256SUMS.minisig
   image:
     runs-on: ubuntu-22.04
     permissions:

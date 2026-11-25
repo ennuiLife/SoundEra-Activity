@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "activity-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "hmac",
@@ -15,11 +15,12 @@ dependencies = [
 
 [[package]]
 name = "activity-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "activity-core",
  "axum",
  "futures-util",
+ "minisign-verify",
  "reqwest",
  "rusqlite",
  "serde",
@@ -706,6 +707,12 @@ name = "mime"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5848f5a9e8117cf94f2f90faac24a87ff81600ff8628c1e3deaab572e76bfa1"
+
+[[package]]
+name = "minisign-verify"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22f9645cb765ea72b8111f36c522475d2daa0d22c957a9826437e97534bc4e9e"
 
 [[package]]
 name = "mio"

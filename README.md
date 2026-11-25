@@ -24,7 +24,7 @@ SoundEra  ──HTTPS──►  your reverse proxy  ──►  SoundEra Activity
 - [Install](#install): [binary](#option-a-the-ready-made-program) · [Docker](#option-b-docker) · [from source](#option-c-build-it-yourself)
 - [Run it as a service](#run-it-as-a-service) · [HTTPS](#put-https-in-front-of-it) · [Configuration](#configuration)
 - [Connect SoundEra](#connect-soundera) · [Using it](#using-it)
-- [Privacy and security](#privacy-and-security) · [Backups and upgrades](#backups-and-upgrades) · [Troubleshooting](#troubleshooting)
+- [Privacy and security](#privacy-and-security) · [Updates](#updates) · [Backups](#backups) · [Troubleshooting](#troubleshooting)
 - [API](#api) · [Developing](#developing) · [Licence](#licence)
 
 ## What you get
@@ -58,13 +58,17 @@ Each [release](https://github.com/ennuiLife/SoundEra-Activity/releases) has a st
 any distribution) and a `SHA256SUMS` file.
 
 ```bash
-VERSION=v0.1.0   # use the newest version on the Releases page
-curl -LO https://github.com/ennuiLife/SoundEra-Activity/releases/download/$VERSION/soundera-activity-$VERSION-linux-x86_64.tar.gz
-curl -LO https://github.com/ennuiLife/SoundEra-Activity/releases/download/$VERSION/SHA256SUMS
+VERSION=v0.2.0   # use the newest version on the Releases page
+BASE=https://github.com/ennuiLife/SoundEra-Activity/releases/download/$VERSION
+curl -LO $BASE/soundera-activity-$VERSION-linux-x86_64.tar.gz
+curl -LO $BASE/soundera-activity-$VERSION-linux-x86_64.tar.gz.minisig
+curl -LO $BASE/SHA256SUMS
 sha256sum -c SHA256SUMS            # must say: OK
 tar xzf soundera-activity-$VERSION-linux-x86_64.tar.gz
 sudo install -m 755 soundera-activity-$VERSION-linux-x86_64/soundera-activity /usr/local/bin/
 soundera-activity --version
+soundera-activity --verify soundera-activity-$VERSION-linux-x86_64.tar.gz soundera-activity-$VERSION-linux-x86_64.tar.gz.minisig
+# must print: version:v0.2.0 file:soundera-activity-v0.2.0-linux-x86_64.tar.gz   (the signature, see Updates)
 ```
 
 The tarball also holds the `deploy/` folder with the service file and proxy examples used below.
@@ -140,9 +144,10 @@ Everything is set with environment variables.
 | `BIND` | `127.0.0.1:4540` | Address and port to listen on. Leave it on the local address when a proxy is in front; the Docker image uses `0.0.0.0:4540` inside the container. |
 | `DATA_DIR` | `data` | Where the database (`activity.db`: follows, blocks, chat) and the session key (`session.key`) live. Created with owner-only permissions. |
 | `RUST_LOG` | `info` | Log level, for example `debug` or `soundera_activity=debug`. Logs never contain passwords, tokens or full addresses. |
+| `UPDATE_CHECK` | on | Set to `off` to stop the daily look for a newer version (the only time the service contacts GitHub). |
 
-Command line: `soundera-activity --version`, `--help`, and `--health` (asks the running service whether it is well; exit
-code 0 or 1; used by the Docker health check).
+Command line: `soundera-activity --version`, `--help`, `--health` (asks the running service whether it is well; exit
+code 0 or 1; used by the Docker health check), `--check-update` and `--verify FILE SIGNATURE` (see [Updates](#updates)).
 
 ## Connect SoundEra
 
@@ -195,12 +200,50 @@ Good to know: anyone with a Navidrome account on your server can use the service
 what they play (unless they switch sharing off). Chat is one room for all of them. It is meant for people who already
 share a server and trust each other, such as family and friends.
 
-## Backups and upgrades
+## Updates
+
+SoundEra Activity never replaces itself: that is left to you, systemd and Docker, because a network service that
+overwrites its own program from the internet would undo the protection the service file and the container give it. What
+it does for you:
+
+- **It tells you when there is a newer version.** At start and once a day it asks GitHub for the newest release (one
+  request, nothing is downloaded) and writes one line to the log when there is something newer, for example
+  `a newer version is available: v0.3.0 (this is 0.2.0)`. Look with `journalctl -u soundera-activity | grep newer`, or ask
+  any time with `soundera-activity --check-update`. To stop it contacting GitHub, set `UPDATE_CHECK=off`.
+- **Every release file is signed** with the project's [minisign](https://jedisct1.github.io/minisign/) key, and the
+  signed text names the exact version and file, so an old genuine file cannot be passed off as a new one. The public
+  key (also built into the program) is:
+
+  ```
+  RWSxvwYiiiQcQQMP9+Pl6QpJi5DVfg8ibrI1Ms4Y2eOx6qD1/xQ8ta4/
+  ```
+
+- **`deploy/update.sh` updates a program installation safely.** It needs only `curl`, `tar` and `sha256sum`:
+
+  ```bash
+  deploy/update.sh --check      # just say whether a newer version exists
+  sudo deploy/update.sh         # download, verify the signature, install, restart
+  ```
+
+  It finds the newest version, downloads the tarball and its signature, has the program you already have installed
+  check the signature (`soundera-activity --verify FILE SIGNATURE`), refuses anything that does not match, then installs
+  the new program next to the old one and renames it into place (so a failure never leaves half a program) and
+  restarts the systemd service.
+- **Docker:** `docker compose pull && docker compose up -d`. To update automatically, run a tool such as Watchtower
+  yourself; the image is rebuilt for every release.
+- **By hand:** download the tarball and its `.minisig`, run `soundera-activity --verify FILE FILE.minisig`, then replace
+  the program and `systemctl restart soundera-activity`. If you have minisign: `minisign -Vm FILE -P <key above>`.
+
+Updating is safe at any time: the database upgrades itself, a restart only clears who is playing right now (everyone's
+SoundEra sends it again within 15 seconds and signs in again by itself), and the protocol is versioned under
+`/activity/v1`, so a SoundEra and a service that are one version apart keep working while people update at different
+times.
+
+## Backups
 
 - **Back up** the data folder (`/var/lib/soundera-activity`, or the Docker volume). Losing it only loses follows,
   blocks and chat history; keep `session.key` if you want people to stay signed in across a restore (otherwise they
   just sign in again automatically).
-- **Upgrade** by replacing the program (or pulling the new image) and restarting. The database upgrades itself.
 - **Move to another machine** by copying the data folder.
 
 ## Troubleshooting

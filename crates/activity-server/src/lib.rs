@@ -3,6 +3,7 @@
 pub mod config;
 pub mod db;
 pub mod navidrome;
+pub mod update;
 
 use activity_core::{PresenceBoard, PresenceUpdate, SessionKey};
 use axum::{
