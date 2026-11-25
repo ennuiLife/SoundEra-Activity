@@ -10,7 +10,7 @@ use std::{collections::HashMap, net::SocketAddr};
 /// A stand-in for Navidrome's `ping`: accepts alice/bob with token "good-token" or password "secret".
 async fn fake_navidrome() -> String {
     async fn ping(Query(q): Query<HashMap<String, String>>) -> Json<Value> {
-        let known = matches!(q.get("u").map(String::as_str), Some("alice") | Some("bob"));
+        let known = matches!(q.get("u").map(String::as_str), Some("alice") | Some("bob") | Some("cara"));
         let good = known && (q.get("t").map(String::as_str) == Some("good-token") && q.contains_key("s") || q.get("p").map(String::as_str) == Some("secret"));
         Json(if good { json!({"subsonic-response": {"status": "ok", "version": "1.16.1"}}) } else { json!({"subsonic-response": {"status": "failed", "error": {"code": 40, "message": "Wrong username or password"}}}) })
     }
@@ -513,4 +513,51 @@ async fn a_picture_is_made_square_small_and_served_to_others() {
     assert_eq!(get(a.clone(), "bob").await.status(), 200);
     assert_eq!(s.http.delete(format!("{}/avatar", s.base)).bearer_auth(&b).send().await.unwrap().status(), 204);
     assert_eq!(get(a.clone(), "bob").await.status(), 404);
+}
+
+#[tokio::test]
+async fn a_party_has_a_dj_who_alone_passes_the_lead_and_only_followed_people_can_be_invited() {
+    let s = start().await;
+    let (a, b, c) = (s.login("alice").await, s.login("bob").await, s.login("cara").await);
+    let call = |method: reqwest::Method, path: String, session: String| {
+        let (http, base) = (s.http.clone(), s.base.clone());
+        async move { http.request(method, format!("{base}{path}")).bearer_auth(session).send().await.unwrap() }
+    };
+    let state = |session: String| {
+        let call = &call;
+        async move { call(reqwest::Method::GET, "/party".into(), session).await.json::<Value>().await.unwrap() }
+    };
+    // Nobody is invited without being followed first.
+    assert_eq!(call(reqwest::Method::PUT, "/party/invite/bob".into(), a.clone()).await.status(), 403);
+    call(reqwest::Method::PUT, "/follows/bob".into(), a.clone()).await;
+    call(reqwest::Method::PUT, "/follows/cara".into(), a.clone()).await;
+    assert_eq!(call(reqwest::Method::PUT, "/party/invite/bob".into(), a.clone()).await.status(), 204);
+    let st = state(b.clone()).await;
+    assert_eq!(st["party"], Value::Null);
+    let id = st["invites"][0]["party_id"].as_u64().unwrap();
+    assert_eq!(st["invites"][0]["from"], "alice");
+    assert_eq!(call(reqwest::Method::PUT, format!("/party/accept/{id}"), b.clone()).await.status(), 200);
+    call(reqwest::Method::PUT, "/party/invite/cara".into(), a.clone()).await;
+    call(reqwest::Method::PUT, format!("/party/accept/{id}"), c.clone()).await;
+    let st = state(c.clone()).await;
+    assert_eq!(st["party"]["leader"], "alice");
+    assert_eq!(st["party"]["members"], json!(["alice", "bob", "cara"]));
+    // Only the DJ passes the lead or removes someone.
+    assert_eq!(call(reqwest::Method::PUT, "/party/leader/cara".into(), b.clone()).await.status(), 403);
+    assert_eq!(call(reqwest::Method::DELETE, "/party/members/cara".into(), b.clone()).await.status(), 403);
+    assert_eq!(call(reqwest::Method::PUT, "/party/leader/bob".into(), a.clone()).await.status(), 200);
+    assert_eq!(state(a.clone()).await["party"]["leader"], "bob");
+    assert_eq!(call(reqwest::Method::PUT, "/party/leader/alice".into(), a.clone()).await.status(), 403, "alice is no longer the DJ");
+    // When the DJ leaves, the longest member takes over; the last one leaving ends the party.
+    call(reqwest::Method::DELETE, "/party".into(), b.clone()).await;
+    assert_eq!(state(a.clone()).await["party"]["leader"], "alice");
+    assert_eq!(state(b.clone()).await["party"], Value::Null);
+    assert_eq!(call(reqwest::Method::DELETE, "/party/members/cara".into(), a.clone()).await.status(), 200);
+    assert_eq!(state(c.clone()).await["party"], Value::Null);
+    // Blocking someone in your party sends them away.
+    call(reqwest::Method::PUT, "/party/invite/bob".into(), a.clone()).await;
+    let id = state(b.clone()).await["invites"][0]["party_id"].as_u64().unwrap();
+    call(reqwest::Method::PUT, format!("/party/accept/{id}"), b.clone()).await;
+    call(reqwest::Method::PUT, "/blocks/bob".into(), a.clone()).await;
+    assert_eq!(state(b.clone()).await["party"], Value::Null);
 }

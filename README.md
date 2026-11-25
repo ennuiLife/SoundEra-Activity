@@ -184,7 +184,7 @@ What the service **sees and keeps**:
 | | |
 |---|---|
 | Sees, never keeps | Your Navidrome token and salt, once, at sign-in. |
-| Keeps in memory only | What each person plays now (forgotten after 90 seconds without an update, and on restart), who listens along with whom. |
+| Keeps in memory only | What each person plays now (forgotten after 90 seconds without an update, and on restart), who listens along with whom, parties and their invitations. |
 | Keeps on disk | User names (from Navidrome), who follows or blocked whom, chat messages and replies (30 days), reactions (as received), each person's profile summary (numbers and the top five artist and genre names) and the picture they chose (a small PNG). |
 | Never has | Passwords, your music library, file names, IP addresses in the database. |
 
@@ -280,6 +280,7 @@ are `{"error": "..."}` with a fitting status code.
 | `PUT /profile` `{plays, liked, playlists, top_artists[], top_genres[]}`, `GET /profile/{user}` | Share your own summary (at most five `{name, plays}` entries each; 403 while sharing is off) and read someone else's: `{user, summary, updated_at_ms, followers, following, you_follow, playing_now}`. 404 when they share nothing, or when either of you blocked the other. |
 | `PUT/DELETE /blocks/{user}`, `GET /blocks` | Block, unblock, list. |
 | `PUT /listen/{host}`, `DELETE /listen`, `GET /listen` | Listen along with someone playing now (returns their presence); leave; who you follow along and who follows along with you. |
+| `GET /party`, `PUT /party/invite/{user}`, `PUT /party/accept/{id}`, `DELETE /party/invites/{id}`, `DELETE /party`, `PUT /party/leader/{user}`, `DELETE /party/members/{user}` | Parties of up to five with one leader, the DJ: your party and invitations; invite someone you follow (any member may); accept or decline; leave (the longest member becomes DJ); only the DJ passes the lead or removes a member. Invitations run out after two minutes; blocking someone in your party sends them away. |
 | `GET /ws?session=TOKEN` | WebSocket with live events (below). |
 
 Example, with a made-up user:

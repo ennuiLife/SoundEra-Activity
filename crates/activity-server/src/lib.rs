@@ -84,12 +84,14 @@ pub struct AppState {
     chat_times: Arc<Mutex<HashMap<String, Vec<u64>>>>,
     /// Who listens along with whom: listener -> host. In memory, like presence.
     listens: Arc<Mutex<HashMap<String, String>>>,
+    /// Parties and their invitations. In memory, like presence.
+    parties: Arc<Mutex<activity_core::party::Parties>>,
 }
 
 impl AppState {
     pub fn new(config: Config, key: SessionKey, db: rusqlite::Connection) -> AppState {
         let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).redirect(reqwest::redirect::Policy::none()).build().expect("http client");
-        AppState { config: Arc::new(config), key, db: Arc::new(Mutex::new(db)), board: Arc::default(), events: broadcast::channel(256).0, http, fails: Arc::default(), chat_times: Arc::default(), listens: Arc::default() }
+        AppState { config: Arc::new(config), key, db: Arc::new(Mutex::new(db)), board: Arc::default(), events: broadcast::channel(256).0, http, fails: Arc::default(), chat_times: Arc::default(), listens: Arc::default(), parties: Arc::default() }
     }
 
     fn too_many_fails(&self, who: &str) -> bool {
@@ -125,6 +127,12 @@ pub fn router(state: AppState) -> Router {
         .route("/activity/v1/blocks/{user}", put(block_user).delete(unblock_user))
         .route("/activity/v1/listen", get(listen_state).delete(listen_leave))
         .route("/activity/v1/listen/{host}", put(listen_join))
+        .route("/activity/v1/party", get(party_state).delete(party_leave))
+        .route("/activity/v1/party/invite/{user}", put(party_invite))
+        .route("/activity/v1/party/accept/{id}", put(party_accept))
+        .route("/activity/v1/party/invites/{id}", axum::routing::delete(party_decline))
+        .route("/activity/v1/party/leader/{user}", put(party_set_leader))
+        .route("/activity/v1/party/members/{user}", axum::routing::delete(party_kick))
         .route("/activity/v1/health", get(health))
         .route("/activity/v1/ws", get(ws))
         .layer(DefaultBodyLimit::max(16 * 1024))
@@ -608,6 +616,8 @@ async fn block_user(State(state): State<AppState>, headers: HeaderMap, axum::ext
     let _ = db::unfollow(&conn, &user, &target);
     let _ = db::unfollow(&conn, &target, &user);
     drop(conn);
+    // ...and sharing a party: the blocked person is sent away (or you leave, when they are the DJ).
+    state.parties.lock().unwrap().separate(&user, &target);
     // ...and listening along, both ways.
     let was_mine = {
         let mut listens = state.listens.lock().unwrap();
@@ -660,4 +670,75 @@ async fn ws_loop(state: AppState, user: String, mut socket: WebSocket) {
             },
         }
     }
+}
+
+// ---- Parties: a few people, one DJ who decides what plays for everyone. Followers poll `GET /party`. ----
+
+#[derive(Serialize)]
+struct PartyOut {
+    party: Option<activity_core::party::PartyView>,
+    invites: Vec<activity_core::party::InviteView>,
+}
+
+fn party_error(e: activity_core::party::PartyError) -> ApiError {
+    use activity_core::party::PartyError as E;
+    let code = match e {
+        E::NotLeader => StatusCode::FORBIDDEN,
+        E::NotInParty | E::NoSuchInvite | E::NotMember => StatusCode::NOT_FOUND,
+        _ => StatusCode::CONFLICT,
+    };
+    ApiError(code, e.message())
+}
+
+async fn party_state(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<PartyOut>> {
+    let user = authed(&state, &headers)?;
+    let mut parties = state.parties.lock().unwrap();
+    let invites = parties.invites_for(&user, now_ms());
+    Ok(Json(PartyOut { party: parties.party_of(&user), invites }))
+}
+
+/// Only people you follow can be invited, and never someone who blocked you or whom you blocked.
+async fn party_invite(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(target): axum::extract::Path<String>) -> ApiResult<StatusCode> {
+    let user = authed(&state, &headers)?;
+    {
+        let conn = state.db.lock().unwrap();
+        if !db::following(&conn, &user).map_err(internal)?.contains(&target) {
+            return Err(ApiError(StatusCode::FORBIDDEN, "you can only invite people you follow"));
+        }
+        if db::is_blocked(&conn, &user, &target).map_err(internal)? || db::is_blocked(&conn, &target, &user).map_err(internal)? {
+            return Err(ApiError(StatusCode::FORBIDDEN, "you cannot invite that person"));
+        }
+    }
+    state.parties.lock().unwrap().invite(&user, &target, now_ms()).map_err(party_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn party_accept(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<u64>) -> ApiResult<Json<activity_core::party::PartyView>> {
+    let user = authed(&state, &headers)?;
+    let view = state.parties.lock().unwrap().accept(&user, id, now_ms()).map_err(party_error)?;
+    Ok(Json(view))
+}
+
+async fn party_decline(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<u64>) -> ApiResult<StatusCode> {
+    let user = authed(&state, &headers)?;
+    state.parties.lock().unwrap().decline(&user, id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn party_leave(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<StatusCode> {
+    let user = authed(&state, &headers)?;
+    state.parties.lock().unwrap().leave(&user);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn party_set_leader(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(target): axum::extract::Path<String>) -> ApiResult<Json<activity_core::party::PartyView>> {
+    let user = authed(&state, &headers)?;
+    let view = state.parties.lock().unwrap().set_leader(&user, &target).map_err(party_error)?;
+    Ok(Json(view))
+}
+
+async fn party_kick(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(target): axum::extract::Path<String>) -> ApiResult<Json<activity_core::party::PartyView>> {
+    let user = authed(&state, &headers)?;
+    let view = state.parties.lock().unwrap().kick(&user, &target).map_err(party_error)?;
+    Ok(Json(view))
 }

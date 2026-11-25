@@ -1,5 +1,6 @@
 //! Protocol types and the rules that need no network: session tokens and the presence board.
 
+pub mod party;
 pub mod presence;
 pub mod session;
 pub mod social;
