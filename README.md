@@ -3,7 +3,7 @@
 A small service that runs next to a Navidrome (OpenSubsonic) server and adds what Navidrome cannot carry:
 live presence now, and later follows, reactions, chat and listen-together. See [PLAN.md](PLAN.md).
 
-Status: login, presence, follows, reactions, chat and blocking. Private, unpublished.
+Status: login, presence, follows, reactions, chat and blocking. Free software under the AGPL-3.0.
 
 ## Run
 
@@ -39,3 +39,11 @@ cargo test
 ```
 
 The tests run against a fake Navidrome with made-up users; no real data is used anywhere.
+
+## Licence
+
+Copyright (C) 2026 ennuiLife. SoundEra Activity is free software: you can use, host, study, change and share it under
+the terms of the [GNU Affero General Public License](LICENSE), version 3 or (at your option) any later version. If you
+run a modified version as a service for other people, the AGPL asks you to offer them its source too.
+
+It is a separate program from the SoundEra player, which talks to it over HTTP.

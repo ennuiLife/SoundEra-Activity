@@ -6,6 +6,8 @@ members = ["crates/activity-core", "crates/activity-server"]
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/ennuiLife/SoundEra-Activity"
 
 [profile.release]
 lto = "thin"
