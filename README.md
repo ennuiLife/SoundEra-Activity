@@ -60,7 +60,9 @@ Each [release](https://github.com/ennuiLife/SoundEra-Activity/releases) has a st
 any distribution) and a `SHA256SUMS` file.
 
 ```bash
-VERSION=v0.2.0   # use the newest version on the Releases page
+# The newest version: /releases/latest redirects to the newest tag, so this never has to be edited (no API call, no rate limit).
+VERSION="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/ennuiLife/SoundEra-Activity/releases/latest | sed 's#.*/##')"
+echo "$VERSION"   # for example v0.3.0. To install a particular version instead: VERSION=v0.3.0
 BASE=https://github.com/ennuiLife/SoundEra-Activity/releases/download/$VERSION
 curl -LO $BASE/soundera-activity-$VERSION-linux-x86_64.tar.gz
 curl -LO $BASE/soundera-activity-$VERSION-linux-x86_64.tar.gz.minisig
@@ -70,7 +72,7 @@ tar xzf soundera-activity-$VERSION-linux-x86_64.tar.gz
 sudo install -m 755 soundera-activity-$VERSION-linux-x86_64/soundera-activity /usr/local/bin/
 soundera-activity --version
 soundera-activity --verify soundera-activity-$VERSION-linux-x86_64.tar.gz soundera-activity-$VERSION-linux-x86_64.tar.gz.minisig
-# must print: version:v0.2.0 file:soundera-activity-v0.2.0-linux-x86_64.tar.gz   (the signature, see Updates)
+# must print: version:$VERSION file:soundera-activity-$VERSION-linux-x86_64.tar.gz   (the signature, see Updates)
 ```
 
 The tarball also holds the `deploy/` folder with the service file and proxy examples used below.
