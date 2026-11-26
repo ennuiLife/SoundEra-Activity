@@ -34,7 +34,7 @@ SoundEra  ──HTTPS──►  your reverse proxy  ──►  SoundEra Activity
 | **Presence** | Everyone sees what the others on the server play right now: song, artist, how long ago, on which device. Updates arrive live. You can switch sharing off at any time, and you disappear at once. |
 | **Follows** | Follow people; show only the people you follow. |
 | **Reactions** | React to what someone is playing right now with like, fire, sad or laugh. They only reach the person, and only while they play that very song. |
-| **Chat** | One chat room for the whole server. 500 characters a message, a few messages per ten seconds, history kept 30 days. You can reply to a message (the reply carries a short look at the one it answers) and delete your own messages. |
+| **Chat** | One chat room for the whole server. 500 characters a message, a few messages per ten seconds, history kept 2 days. You can reply to a message (the reply carries a short look at the one it answers) and delete your own messages. |
 | **Pictures** | Each person can set a profile picture (Navidrome cannot store one). Send any PNG or JPEG up to 4 MB; the service keeps a 256 px square PNG made from the middle of it. Everyone using the service sees it. |
 | **Profiles** | Each person can share a small summary (plays, liked songs and playlists counts, top five artists and genres) so others can open their profile. Nothing else about the library is sent. Switching sharing off removes it. |
 | **Blocking** | Block someone: you stop seeing their presence, reactions and chat, they stop seeing yours, follows end, and listening along ends. They are not told. |
@@ -187,7 +187,7 @@ What the service **sees and keeps**:
 |---|---|
 | Sees, never keeps | Your Navidrome token and salt, once, at sign-in. |
 | Keeps in memory only | What each person plays now (forgotten after 90 seconds without an update, and on restart), who listens along with whom, parties and their invitations. |
-| Keeps on disk | User names (from Navidrome), who follows or blocked whom, chat messages and replies (30 days), reactions (as received), each person's profile summary (numbers and the top five artist and genre names) and the picture they chose (a small PNG). |
+| Keeps on disk | User names (from Navidrome), who follows or blocked whom, chat messages and replies (2 days), reactions (as received), each person's profile summary (numbers and the top five artist and genre names) and the picture they chose (a small PNG). |
 | Never has | Passwords, your music library, file names, IP addresses in the database. |
 
 How it protects you:

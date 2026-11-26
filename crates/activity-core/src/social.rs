@@ -6,8 +6,8 @@ pub const MAX_CHAT_CHARS: usize = 500;
 /// At most this many chat messages per user in `CHAT_BURST_WINDOW_MS`.
 pub const CHAT_BURST: usize = 5;
 pub const CHAT_BURST_WINDOW_MS: u64 = 10_000;
-/// Chat history is kept this long.
-pub const CHAT_KEEP_MS: u64 = 30 * 24 * 3600 * 1000;
+/// Chat history is kept this long: two days. Older messages are removed whenever someone sends or reads the chat.
+pub const CHAT_KEEP_MS: u64 = 2 * 24 * 3600 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

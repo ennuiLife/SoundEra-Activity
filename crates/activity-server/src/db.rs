@@ -182,10 +182,16 @@ pub fn reactions_for(conn: &Connection, user: &str, since_ms: u64, limit: u32) -
 
 // ---- chat ----
 
-#[allow(clippy::too_many_arguments)]
-pub fn add_message(conn: &Connection, from: &str, body: &str, reply_to: Option<i64>, to: Option<&str>, song_id: Option<&str>, now_ms: u64, keep_ms: u64) -> rusqlite::Result<i64> {
+/// Remove the messages older than `keep_ms` and the reactions that belonged to them.
+pub fn prune_messages(conn: &Connection, now_ms: u64, keep_ms: u64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM messages WHERE created_at < ?1", params![now_ms.saturating_sub(keep_ms) as i64])?;
     conn.execute("DELETE FROM message_reactions WHERE message_id NOT IN (SELECT id FROM messages)", [])?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn add_message(conn: &Connection, from: &str, body: &str, reply_to: Option<i64>, to: Option<&str>, song_id: Option<&str>, now_ms: u64, keep_ms: u64) -> rusqlite::Result<i64> {
+    prune_messages(conn, now_ms, keep_ms)?;
     conn.execute("INSERT INTO messages (from_user, body, reply_to, to_user, song_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![from, body, reply_to, to, song_id, now_ms as i64])?;
     Ok(conn.last_insert_rowid())
 }

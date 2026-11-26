@@ -616,7 +616,10 @@ struct ChatQuery {
 async fn list_chat(State(state): State<AppState>, headers: HeaderMap, Query(q): Query<ChatQuery>) -> ApiResult<Json<Vec<activity_core::ChatMessage>>> {
     let user = authed(&state, &headers)?;
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    Ok(Json(db::messages_for(&state.db.lock().unwrap(), &user, q.after, limit).map_err(internal)?))
+    let conn = state.db.lock().unwrap();
+    // Reading also clears what is older than the history limit, so nothing old is shown while the chat is quiet.
+    db::prune_messages(&conn, now_ms(), activity_core::social::CHAT_KEEP_MS).map_err(internal)?;
+    Ok(Json(db::messages_for(&conn, &user, q.after, limit).map_err(internal)?))
 }
 
 async fn delete_chat(State(state): State<AppState>, headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<i64>) -> ApiResult<StatusCode> {
